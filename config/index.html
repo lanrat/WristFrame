@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pebble Image</title>
+<style>
+  :root { color-scheme: light dark; --accent: #ff4700; }
+  body {
+    margin: 0; padding: 16px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #f2f2f2; color: #222;
+  }
+  @media (prefers-color-scheme: dark) { body { background: #1a1a1a; color: #eee; } }
+  h1 { font-size: 20px; margin: 0 0 16px; }
+  .preview {
+    display: flex; justify-content: center; align-items: center;
+    min-height: 260px; margin: 16px 0;
+  }
+  canvas#preview {
+    image-rendering: pixelated; image-rendering: crisp-edges;
+    background: #000; max-width: 100%;
+  }
+  canvas#preview.round { border-radius: 50%; }
+  .placeholder { opacity: 0.6; text-align: center; }
+  label.picker, button {
+    display: block; width: 100%; box-sizing: border-box;
+    padding: 14px; margin-top: 12px; border: 0; border-radius: 8px;
+    font-size: 17px; text-align: center; cursor: pointer;
+  }
+  label.picker { background: #ddd; color: #222; }
+  @media (prefers-color-scheme: dark) { label.picker { background: #333; color: #eee; } }
+  button.save { background: var(--accent); color: #fff; }
+  button.save:disabled { opacity: 0.4; }
+  button.cancel { background: transparent; color: inherit; }
+  input[type=file] { display: none; }
+</style>
+</head>
+<body>
+<h1>Pebble Image</h1>
+
+<div class="preview">
+  <p class="placeholder" id="placeholder">No image selected</p>
+  <canvas id="preview" hidden></canvas>
+</div>
+
+<label class="picker">Choose photo<input type="file" id="file" accept="image/*"></label>
+<button class="save" id="save" disabled>Send to watch</button>
+<button class="cancel" id="cancel">Cancel</button>
+
+<script>
+(function () {
+  'use strict';
+
+  var params = new URLSearchParams(location.search);
+  var WIDTH = parseInt(params.get('width'), 10) || 200;
+  var HEIGHT = parseInt(params.get('height'), 10) || 228;
+  var ROUND = params.get('round') === '1' ? 1 : 0;
+  var RETURN_TO = params.get('return_to') || 'pebblejs://close#';
+  var PREVIEW_SCALE = 1;
+
+  var fileInput = document.getElementById('file');
+  var saveButton = document.getElementById('save');
+  var preview = document.getElementById('preview');
+  var placeholder = document.getElementById('placeholder');
+  var packed = null;
+
+  // Visible pixel columns [x0, x1) of row y. Must match prv_row_span in
+  // src/c/main.c: on round displays keep pixels whose centre lies within the
+  // screen radius plus a 1px margin.
+  function rowSpan(y) {
+    if (!ROUND) return [0, WIDTH];
+    var d = Math.min(WIDTH, HEIGHT) + 2;
+    var dy = 2 * y + 1 - HEIGHT;
+    var lim = d * d - dy * dy;
+    if (lim < 0) return [0, 0];
+    var x = 0;
+    while (x < (WIDTH >> 1) && (2 * x + 1 - WIDTH) * (2 * x + 1 - WIDTH) > lim) x++;
+    return [x, WIDTH - x];
+  }
+
+  function loadImage(file) {
+    return new Promise(function (resolve, reject) {
+      var img = new Image();
+      var url = URL.createObjectURL(file);
+      img.onload = function () { URL.revokeObjectURL(url); resolve(img); };
+      img.onerror = function () { URL.revokeObjectURL(url); reject(new Error('Could not load image')); };
+      img.src = url;
+    });
+  }
+
+  // Scale the image to cover WIDTH x HEIGHT and crop the overflow evenly.
+  // Downscale in halving steps so large photos stay smooth on every browser.
+  function coverCrop(img) {
+    var iw = img.naturalWidth, ih = img.naturalHeight;
+    var scale = Math.max(WIDTH / iw, HEIGHT / ih);
+    var sw = WIDTH / scale, sh = HEIGHT / scale;
+    var sx = (iw - sw) / 2, sy = (ih - sh) / 2;
+
+    var src = img, srcX = sx, srcY = sy, srcW = sw, srcH = sh;
+    while (srcW / 2 >= WIDTH && srcH / 2 >= HEIGHT) {
+      var step = document.createElement('canvas');
+      step.width = Math.round(srcW / 2);
+      step.height = Math.round(srcH / 2);
+      var sctx = step.getContext('2d');
+      sctx.imageSmoothingEnabled = true;
+      sctx.imageSmoothingQuality = 'high';
+      sctx.drawImage(src, srcX, srcY, srcW, srcH, 0, 0, step.width, step.height);
+      src = step; srcX = 0; srcY = 0; srcW = step.width; srcH = step.height;
+    }
+
+    var out = document.createElement('canvas');
+    out.width = WIDTH;
+    out.height = HEIGHT;
+    var ctx = out.getContext('2d');
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(src, srcX, srcY, srcW, srcH, 0, 0, WIDTH, HEIGHT);
+    return ctx.getImageData(0, 0, WIDTH, HEIGHT);
+  }
+
+  // Floyd-Steinberg dither to Pebble's 64-colour palette (2 bits per channel).
+  // Returns one 6-bit rrggbb value per pixel and updates `image` in place.
+  function dither(image) {
+    var w = image.width, h = image.height, d = image.data;
+    var buf = new Float32Array(w * h * 3);
+    for (var i = 0, j = 0; i < d.length; i += 4, j += 3) {
+      buf[j] = d[i]; buf[j + 1] = d[i + 1]; buf[j + 2] = d[i + 2];
+    }
+    var out = new Uint8Array(w * h);
+    for (var y = 0; y < h; y++) {
+      for (var x = 0; x < w; x++) {
+        var p = y * w + x, value = 0;
+        for (var c = 0; c < 3; c++) {
+          var k = p * 3 + c;
+          var old = Math.min(255, Math.max(0, buf[k]));
+          var level = Math.round(old / 85);
+          var err = old - level * 85;
+          value = (value << 2) | level;
+          d[p * 4 + c] = level * 85;
+          if (x + 1 < w) buf[k + 3] += err * 7 / 16;
+          if (y + 1 < h) {
+            if (x > 0) buf[k + w * 3 - 3] += err * 3 / 16;
+            buf[k + w * 3] += err * 5 / 16;
+            if (x + 1 < w) buf[k + w * 3 + 3] += err * 1 / 16;
+          }
+        }
+        d[p * 4 + 3] = 255;
+        out[p] = value;
+      }
+    }
+    return out;
+  }
+
+  // Pack visible pixels at 6 bits each, MSB first.
+  function pack(pixels) {
+    var bytes = [];
+    var acc = 0, bits = 0;
+    for (var y = 0; y < HEIGHT; y++) {
+      var span = rowSpan(y);
+      for (var x = span[0]; x < span[1]; x++) {
+        acc = ((acc << 6) | pixels[y * WIDTH + x]) & 0xffff;
+        bits += 6;
+        if (bits >= 8) {
+          bits -= 8;
+          bytes.push((acc >> bits) & 0xff);
+        }
+      }
+    }
+    if (bits > 0) bytes.push((acc << (8 - bits)) & 0xff);
+    return new Uint8Array(bytes);
+  }
+
+  function base64(bytes) {
+    var s = '';
+    for (var i = 0; i < bytes.length; i += 0x8000) {
+      s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    }
+    return btoa(s);
+  }
+
+  function showPreview(image) {
+    var avail = Math.max(1, document.body.clientWidth - 32);
+    PREVIEW_SCALE = Math.max(1, Math.floor(Math.min(avail / WIDTH, 2)));
+    preview.width = WIDTH;
+    preview.height = HEIGHT;
+    preview.style.width = WIDTH * PREVIEW_SCALE + 'px';
+    preview.style.height = HEIGHT * PREVIEW_SCALE + 'px';
+    preview.classList.toggle('round', !!ROUND);
+    preview.getContext('2d').putImageData(image, 0, 0);
+    preview.hidden = false;
+    placeholder.hidden = true;
+  }
+
+  fileInput.addEventListener('change', function () {
+    var file = fileInput.files && fileInput.files[0];
+    if (!file) return;
+    saveButton.disabled = true;
+    placeholder.textContent = 'Converting…';
+    loadImage(file).then(function (img) {
+      var image = coverCrop(img);
+      var pixels = dither(image);
+      packed = pack(pixels);
+      showPreview(image);
+      saveButton.disabled = false;
+    }).catch(function (err) {
+      packed = null;
+      preview.hidden = true;
+      placeholder.hidden = false;
+      placeholder.textContent = err.message;
+    });
+  });
+
+  saveButton.addEventListener('click', function () {
+    if (!packed) return;
+    var result = { width: WIDTH, height: HEIGHT, round: ROUND, data: base64(packed) };
+    location.href = RETURN_TO + encodeURIComponent(JSON.stringify(result));
+  });
+
+  document.getElementById('cancel').addEventListener('click', function () {
+    location.href = RETURN_TO;
+  });
+})();
+</script>
+</body>
+</html>
