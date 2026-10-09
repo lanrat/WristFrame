@@ -10,9 +10,11 @@ Supported watches: **Pebble Time 2** (`emery`, 200×228) and **Pebble Round 2**
 
 1. Install the `.pbw` (from the latest [GitHub Actions run](../../actions) or
    [release](../../releases)) with the Pebble app.
-2. Open the app's settings in the Pebble app, tap one of the 4 slots, choose a
-   photo and tap **Send to slot N**. Repeat for other slots, or use
-   **Clear slot N** to empty a slot.
+2. Open the app's settings in the Pebble app. Tap a slot and choose a photo,
+   or use **Clear slot N** to empty it; repeat for as many slots as you like.
+   Then tap **Send to watch** to send all the changes at once. The watch shows
+   each photo as it arrives, with a progress bar (a ring on the Round 2) and
+   a count such as "2/3".
 3. Photos are stored on the watch, so they are available even when the phone
    is not connected. Press **Up** and **Down** to switch between them. The app
    reopens on the last photo shown.

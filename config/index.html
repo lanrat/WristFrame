@@ -49,6 +49,11 @@
     position: absolute; left: 4px; top: 4px; min-width: 18px; padding: 1px 4px;
     border-radius: 9px; background: rgba(0, 0, 0, 0.6); color: #fff; font-size: 12px;
   }
+  .slot .badge {
+    position: absolute; right: 4px; bottom: 4px; padding: 1px 6px;
+    border-radius: 9px; background: var(--accent); color: #fff; font-size: 11px;
+  }
+  .slot.cleared img { opacity: 0.3; }
   .help { margin: 8px 0 0; font-size: 14px; opacity: 0.7; text-align: center; }
   [hidden], input[type=file] { display: none !important; }
   footer { margin-top: 24px; text-align: center; font-size: 14px; opacity: 0.7; }
@@ -94,8 +99,14 @@
   var placeholder = document.getElementById('placeholder');
   var clearButton = document.getElementById('clear');
   var slotsEl = document.getElementById('slots');
-  var packed = null;
-  var thumb = null;
+  // Version 2+ apps accept several changes per save; older ones one slot.
+  var BATCH = parseInt(params.get('v'), 10) >= 2;
+
+  // Unsent changes by slot: {op: 'set', packed, thumb, image} or {op: 'clear'}.
+  var changes = {};
+  var converting = false;
+  // A status or error shown in place of the selected slot's prompt.
+  var notice = null;
 
   // Slot state passed by the app in the URL hash: {slots: [{filled, thumb}]}.
   var slots = [];
@@ -391,53 +402,89 @@
     return toUrlSafe(c.toDataURL('image/jpeg', 0.6).split(',')[1]);
   }
 
+  function changeCount() {
+    return Object.keys(changes).length;
+  }
+
+  function renderTile(slot, i) {
+    var change = changes[i];
+    var tile = document.createElement('button');
+    tile.className = 'slot' + (ROUND ? ' round' : '') + (i === selected ? ' selected' : '') +
+      (change && change.op === 'clear' ? ' cleared' : '');
+    tile.setAttribute('aria-label', 'Slot ' + (i + 1));
+    var thumbData = change && change.op === 'set' ? change.thumb : slot.thumb;
+    if (thumbData) {
+      var img = document.createElement('img');
+      img.src = 'data:image/jpeg;base64,' + fromUrlSafe(thumbData);
+      img.alt = '';
+      tile.appendChild(img);
+    } else {
+      tile.appendChild(document.createTextNode(slot.filled ? 'Image' : 'Empty'));
+    }
+    var num = document.createElement('span');
+    num.className = 'num';
+    num.textContent = i + 1;
+    tile.appendChild(num);
+    if (change) {
+      var badge = document.createElement('span');
+      badge.className = 'badge';
+      badge.textContent = change.op === 'set' ? 'New' : 'Clear';
+      tile.appendChild(badge);
+    }
+    tile.addEventListener('click', function () {
+      selected = i;
+      notice = null;
+      render();
+    });
+    return tile;
+  }
+
   function render() {
     slotsEl.textContent = '';
     slots.forEach(function (slot, i) {
-      var tile = document.createElement('button');
-      tile.className = 'slot' + (ROUND ? ' round' : '') + (i === selected ? ' selected' : '');
-      tile.setAttribute('aria-label', 'Slot ' + (i + 1));
-      if (slot.thumb) {
-        var img = document.createElement('img');
-        img.src = 'data:image/jpeg;base64,' + fromUrlSafe(slot.thumb);
-        img.alt = '';
-        tile.appendChild(img);
-      } else {
-        tile.appendChild(document.createTextNode(slot.filled ? 'Image' : 'Empty'));
-      }
-      var num = document.createElement('span');
-      num.className = 'num';
-      num.textContent = i + 1;
-      tile.appendChild(num);
-      tile.addEventListener('click', function () {
-        selected = i;
-        render();
-      });
-      slotsEl.appendChild(tile);
+      slotsEl.appendChild(renderTile(slot, i));
     });
 
     var label = 'slot ' + (selected + 1);
-    saveButton.textContent = 'Send to ' + label;
-    clearButton.textContent = 'Clear ' + label;
-    clearButton.hidden = !slots[selected].filled || !!packed;
-    if (!packed) {
-      placeholder.textContent = slots[selected].filled
-        ? 'Choose a photo to replace ' + label
-        : 'Choose a photo for ' + label;
+    var change = changes[selected];
+    if (change && change.op === 'set' && !notice) {
+      showPreview(change.image);
+    } else {
+      preview.hidden = true;
+      placeholder.hidden = false;
+      placeholder.textContent = notice ||
+        (change ? 'Slot ' + (selected + 1) + ' will be cleared' :
+         slots[selected].filled ? 'Choose a photo to replace ' + label :
+         'Choose a photo for ' + label);
+    }
+
+    clearButton.hidden = !change && !slots[selected].filled;
+    clearButton.textContent = !change ? 'Clear ' + label :
+      change.op === 'set' ? 'Remove new photo' : 'Keep ' + label;
+
+    if (BATCH) {
+      var count = changeCount();
+      saveButton.textContent = count
+        ? 'Send to watch (' + count + (count === 1 ? ' change)' : ' changes)')
+        : 'Send to watch';
+      saveButton.disabled = converting || !count;
+    } else {
+      saveButton.textContent = 'Send to ' + label;
+      saveButton.disabled = converting || !change;
     }
   }
 
   function setStatus(message) {
+    notice = message;
     placeholder.hidden = false;
+    preview.hidden = true;
     placeholder.textContent = message;
   }
 
   function showError(message) {
-    packed = null;
-    saveButton.disabled = true;
-    preview.hidden = true;
-    placeholder.hidden = false;
-    placeholder.textContent = message;
+    converting = false;
+    notice = message;
+    render();
   }
 
   window.addEventListener('error', function (e) {
@@ -459,37 +506,54 @@
       showError('No photo was received from the Pebble app. Please try again.');
       return;
     }
+    // The photo goes to the slot selected now, even if another is tapped
+    // while it converts.
+    var target = selected;
+    converting = true;
     saveButton.disabled = true;
-    preview.hidden = true;
-    placeholder.hidden = false;
-    placeholder.textContent = 'Loading photo (' + formatSize(file.size) + ')\u2026';
+    setStatus('Loading photo (' + formatSize(file.size) + ')\u2026');
     decodeImage(file).then(function (img) {
-      placeholder.textContent = 'Converting\u2026';
+      setStatus('Converting\u2026');
       var image = coverCrop(img);
       if (img.close) img.close();
       var pixels = dither(image);
-      packed = pack(pixels);
       showPreview(image);
-      thumb = makeThumb();
-      saveButton.disabled = false;
+      changes[target] = { op: 'set', packed: pack(pixels), thumb: makeThumb(), image: image };
+      converting = false;
+      notice = null;
       render();
     }).catch(function (err) {
       showError(err.message || String(err));
     });
   });
 
-  saveButton.addEventListener('click', function () {
-    if (!packed) return;
-    var result = {
-      op: 'set', slot: selected, width: WIDTH, height: HEIGHT, round: ROUND,
-      data: base64(packed), thumb: thumb
+  function toOp(slot) {
+    var change = changes[slot];
+    if (change.op === 'clear') return { op: 'clear', slot: slot };
+    return {
+      op: 'set', slot: slot, width: WIDTH, height: HEIGHT, round: ROUND,
+      data: base64(change.packed), thumb: change.thumb
     };
+  }
+
+  saveButton.addEventListener('click', function () {
+    var result;
+    if (BATCH) {
+      if (!changeCount()) return;
+      result = { ops: Object.keys(changes).map(function (slot) { return toOp(+slot); }) };
+    } else {
+      if (!changes[selected]) return;
+      result = toOp(selected);
+    }
     location.href = RETURN_TO + encodeURIComponent(JSON.stringify(result));
   });
 
+  // Undoes the selected slot's change, or marks a filled slot to be cleared.
   clearButton.addEventListener('click', function () {
-    var result = { op: 'clear', slot: selected };
-    location.href = RETURN_TO + encodeURIComponent(JSON.stringify(result));
+    if (changes[selected]) delete changes[selected];
+    else changes[selected] = { op: 'clear' };
+    notice = null;
+    render();
   });
 
   document.getElementById('cancel').addEventListener('click', function () {

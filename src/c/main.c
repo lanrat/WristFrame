@@ -64,6 +64,9 @@ static struct {
   bool active;
   bool persist;
   int slot;
+  // Position of this image in the phone's current batch, for the progress label.
+  int index;
+  int count;
   ImageMeta meta;
   uint32_t offset;
   uint32_t checksum;
@@ -296,6 +299,8 @@ static void prv_handle_begin(DictionaryIterator *iter) {
   s_filled &= ~(1 << slot);
   s_current = slot;
   s_rx.active = true;
+  s_rx.index = prv_int(iter, MESSAGE_KEY_Index);
+  s_rx.count = prv_int(iter, MESSAGE_KEY_Count);
   s_rx.persist = persist_get_max_size() >= meta.size + 1024;
   s_rx.slot = slot;
   s_rx.meta = meta;
@@ -338,6 +343,7 @@ static void prv_handle_end(void) {
                   s_rx.checksum == s_rx.meta.checksum;
   const int slot = s_rx.slot;
   s_rx.active = false;
+  layer_mark_dirty(s_image_layer);  // removes the progress bar
   if (!ok) {
     APP_LOG(APP_LOG_LEVEL_ERROR, "Image transfer failed");
     prv_send(CMD_DONE, 0, slot);
@@ -398,7 +404,10 @@ static void prv_inbox_received(DictionaryIterator *iter, void *context) {
 static void prv_step(int dir) {
   // A button press abandons any transfer in progress; the phone retries it
   // the next time the app opens.
-  s_rx.active = false;
+  if (s_rx.active) {
+    s_rx.active = false;
+    layer_mark_dirty(s_image_layer);
+  }
   const int from = s_current < 0 ? 0 : s_current;
   for (int i = 1; i <= SLOT_COUNT; i++) {
     const int s = (from + dir * i + SLOT_COUNT * SLOT_COUNT) % SLOT_COUNT;
@@ -424,12 +433,54 @@ static void prv_click_config(void *context) {
   window_single_click_subscribe(BUTTON_ID_DOWN, prv_down_click);
 }
 
+#define PROGRESS_THICKNESS 6
+
+// While an image is arriving: a bar along the bottom edge (a ring around the
+// edge on round displays), plus "2/3" when the phone is sending several.
+static void prv_draw_progress(GContext *ctx, GRect bounds) {
+  if (!s_rx.active || s_rx.meta.size == 0) {
+    return;
+  }
+  const int32_t done = s_rx.offset;
+  const int32_t total = s_rx.meta.size;
+#if defined(PBL_ROUND)
+  graphics_context_set_fill_color(ctx, GColorBlack);
+  graphics_fill_radial(ctx, bounds, GOvalScaleModeFitCircle, PROGRESS_THICKNESS, 0, TRIG_MAX_ANGLE);
+  graphics_context_set_fill_color(ctx, GColorWhite);
+  graphics_fill_radial(ctx, grect_inset(bounds, GEdgeInsets(1)), GOvalScaleModeFitCircle,
+                       PROGRESS_THICKNESS - 2, 0, (int32_t)((int64_t)TRIG_MAX_ANGLE * done / total));
+  const int label_bottom = bounds.size.h - PROGRESS_THICKNESS - 14;
+#else
+  const GRect bar = GRect(0, bounds.size.h - PROGRESS_THICKNESS, bounds.size.w, PROGRESS_THICKNESS);
+  graphics_context_set_fill_color(ctx, GColorBlack);
+  graphics_fill_rect(ctx, bar, 0, GCornerNone);
+  graphics_context_set_fill_color(ctx, GColorWhite);
+  graphics_fill_rect(ctx, GRect(0, bar.origin.y + 1, (bar.size.w * done) / total, bar.size.h - 2),
+                     0, GCornerNone);
+  const int label_bottom = bar.origin.y - 4;
+#endif
+  if (s_rx.count > 1 && s_rx.index > 0) {
+    static char label[24];
+    snprintf(label, sizeof(label), "%d/%d", s_rx.index, s_rx.count);
+    const GRect box = GRect(bounds.size.w / 2 - 22, label_bottom - 22, 44, 22);
+    graphics_context_set_fill_color(ctx, GColorBlack);
+    graphics_fill_rect(ctx, box, 4, GCornersAll);
+    graphics_context_set_text_color(ctx, GColorWhite);
+    graphics_draw_text(ctx, label, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD),
+                       GRect(box.origin.x, box.origin.y - 3, box.size.w, box.size.h),
+                       GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+  }
+}
+
 static void prv_image_update_proc(Layer *layer, GContext *ctx) {
   if (!s_bitmap) {
     return;
   }
+  const GRect bounds = layer_get_bounds(layer);
   graphics_context_set_compositing_mode(ctx, GCompOpAssign);
-  graphics_draw_bitmap_in_rect(ctx, s_bitmap, layer_get_bounds(layer));
+  graphics_draw_bitmap_in_rect(ctx, s_bitmap, bounds);
+  graphics_context_set_compositing_mode(ctx, GCompOpSet);
+  prv_draw_progress(ctx, bounds);
 }
 
 static void prv_window_load(Window *window) {

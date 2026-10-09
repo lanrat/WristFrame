@@ -31,6 +31,12 @@ var PLATFORMS = {
 var watchInfo = null;
 // id of the queued operation being sent, or null.
 var busy = null;
+// Images the watch has finished since the queue was last empty, so it can
+// show "2/3" while a batch arrives.
+var batchDone = 0;
+
+// Tells the config page this version accepts several changes per save.
+var CONFIG_PROTOCOL = 2;
 
 function screenInfo() {
   if (watchInfo) {
@@ -162,7 +168,7 @@ function enqueue(op) {
   save('thumbs', thumbs);
 }
 
-function buildMessages(op) {
+function buildMessages(op, queue) {
   if (op.op === 'clear') {
     return [{ Cmd: CMD_CLEAR, Slot: op.slot }];
   }
@@ -175,7 +181,9 @@ function buildMessages(op) {
     Height: op.height,
     Round: op.round,
     Size: bytes.length,
-    Checksum: fnv1a(bytes)
+    Checksum: fnv1a(bytes),
+    Index: batchDone + 1,
+    Count: batchDone + queue.filter(function(o) { return o.op === 'set'; }).length
   }];
   for (var offset = 0; offset < bytes.length; offset += chunkSize) {
     messages.push({
@@ -211,11 +219,12 @@ function processQueue() {
   var start = Date.now();
   busy = id;
   console.log('Sending ' + op.op + ' for slot ' + op.slot);
-  sendAll(buildMessages(op), function(err) {
+  sendAll(buildMessages(op, queue), function(err) {
     if (err) {
       // Usually a lost connection; retried the next time the app opens.
       console.log('Transfer failed: ' + JSON.stringify(err));
       busy = null;
+      batchDone = 0;
       return;
     }
     console.log('Sent in ' + (Date.now() - start) + ' ms');
@@ -238,12 +247,18 @@ function handleDone(msg) {
   if (msg.Status === 1) {
     console.log('Watch finished ' + op.op + ' for slot ' + op.slot);
     queue.shift();
+    if (!queue.length) {
+      batchDone = 0;
+    } else if (op.op === 'set') {
+      batchDone++;
+    }
     slots = op.op === 'set' ? slots | (1 << op.slot) : slots & ~(1 << op.slot);
     save('slots', slots);
     save('queue', queue);
     processQueue();
   } else {
     // Leave it for the next launch rather than retrying in a loop.
+    batchDone = 0;
     op.attempts++;
     console.log('Watch rejected ' + op.op + ' for slot ' + op.slot);
     if (op.attempts >= MAX_ATTEMPTS) {
@@ -310,7 +325,7 @@ Pebble.addEventListener('appmessage', function(e) {
 Pebble.addEventListener('showConfiguration', function() {
   var info = screenInfo();
   Pebble.openURL(CONFIG_URL + '?width=' + info.width + '&height=' + info.height +
-                 '&round=' + info.round + '#' +
+                 '&round=' + info.round + '&v=' + CONFIG_PROTOCOL + '#' +
                  encodeURIComponent(JSON.stringify({ slots: slotSummary() })));
 });
 
@@ -325,23 +340,31 @@ Pebble.addEventListener('webviewclosed', function(e) {
     console.log('Invalid config response: ' + err);
     return;
   }
-  if (!result || typeof result.slot !== 'number' || result.slot < 0 ||
-      result.slot >= SLOT_COUNT) {
-    return;
-  }
-  if (result.op === 'clear') {
-    enqueue({ op: 'clear', slot: result.slot });
-  } else if (result.op === 'set' && typeof result.data === 'string') {
-    enqueue({
-      op: 'set',
-      slot: result.slot,
-      width: result.width,
-      height: result.height,
-      round: result.round,
-      data: result.data,
-      thumb: typeof result.thumb === 'string' ? result.thumb : null
-    });
-  } else {
+  // {ops: [...]} from this version's page; a bare op from older pages.
+  var ops = result && Array.isArray(result.ops) ? result.ops : [result];
+  var queued = 0;
+  ops.forEach(function(op) {
+    if (!op || typeof op.slot !== 'number' || op.slot < 0 || op.slot >= SLOT_COUNT) {
+      return;
+    }
+    if (op.op === 'clear') {
+      enqueue({ op: 'clear', slot: op.slot });
+    } else if (op.op === 'set' && typeof op.data === 'string') {
+      enqueue({
+        op: 'set',
+        slot: op.slot,
+        width: op.width,
+        height: op.height,
+        round: op.round,
+        data: op.data,
+        thumb: typeof op.thumb === 'string' ? op.thumb : null
+      });
+    } else {
+      return;
+    }
+    queued++;
+  });
+  if (!queued) {
     return;
   }
   if (watchInfo) {
