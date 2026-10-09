@@ -34,6 +34,8 @@
   button.save:disabled { opacity: 0.4; }
   button.cancel { background: transparent; color: inherit; }
   input[type=file] { display: none; }
+  footer { margin-top: 24px; text-align: center; font-size: 14px; opacity: 0.7; }
+  footer a { color: inherit; }
 </style>
 </head>
 <body>
@@ -47,6 +49,10 @@
 <label class="picker">Choose photo<input type="file" id="file" accept="image/*"></label>
 <button class="save" id="save" disabled>Send to watch</button>
 <button class="cancel" id="cancel">Cancel</button>
+
+<footer>
+  <a href="https://github.com/lanrat/WristFrame" target="_blank" rel="noopener">WristFrame on GitHub</a>
+</footer>
 
 <script>
 (function () {
