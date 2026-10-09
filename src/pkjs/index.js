@@ -2,7 +2,9 @@
 //
 // The config page (config/index.html) does all image processing: it crops,
 // resizes, dithers to the 64-colour palette and packs the pixels. This file
-// only moves those bytes to the watch and retries interrupted transfers.
+// only moves those bytes to the watch's image slots, keeps a queue of
+// operations that have not reached the watch yet, and remembers a thumbnail
+// per slot for the config page.
 
 var CONFIG_URL = 'https://lanrat.github.io/WristFrame/';
 
@@ -12,8 +14,13 @@ var CMD_BEGIN = 3;
 var CMD_CHUNK = 4;
 var CMD_END = 5;
 var CMD_DONE = 6;
+var CMD_CLEAR = 7;
+
+var SLOT_COUNT = 4;
 
 var MAX_RETRIES = 3;
+// Operations the watch rejects this many times are dropped.
+var MAX_ATTEMPTS = 3;
 
 // Screen info for supported platforms, used before the watch has reported in.
 var PLATFORMS = {
@@ -22,7 +29,8 @@ var PLATFORMS = {
 };
 
 var watchInfo = null;
-var sending = false;
+// id of the queued operation being sent, or null.
+var busy = null;
 
 function screenInfo() {
   if (watchInfo) {
@@ -43,6 +51,9 @@ function base64Decode(str) {
   for (var i = 0; i < chars.length; i++) {
     lookup[chars.charAt(i)] = i;
   }
+  // The config page sends URL-safe base64.
+  lookup['-'] = 62;
+  lookup['_'] = 63;
   var out = [];
   var acc = 0;
   var bits = 0;
@@ -100,34 +111,69 @@ function sendAll(messages, done) {
   })(null);
 }
 
-function loadPending() {
+function load(key, fallback) {
   try {
-    var raw = localStorage.getItem('pending');
-    return raw ? JSON.parse(raw) : null;
+    var raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
   } catch (e) {
-    return null;
+    return fallback;
   }
 }
 
-function sendPending() {
-  var image = loadPending();
-  if (!image || !watchInfo || sending) {
-    return;
-  }
-  if (image.width !== watchInfo.width || image.height !== watchInfo.height ||
-      image.round !== watchInfo.round) {
-    console.log('Pending image does not match this watch, discarding');
-    localStorage.removeItem('pending');
-    return;
-  }
+function save(key, value) {
+  localStorage.setItem(key, JSON.stringify(value));
+}
 
-  var bytes = base64Decode(image.data);
+// Queue of {id, op: 'set' | 'clear', slot, attempts, ...image} not yet
+// confirmed by the watch.
+function loadQueue() {
+  var queue = load('queue', []);
+  // Single-image versions stored one pending image under 'pending'.
+  var legacy = load('pending', null);
+  if (legacy) {
+    localStorage.removeItem('pending');
+    legacy.op = 'set';
+    legacy.slot = 0;
+    legacy.id = 'legacy';
+    legacy.attempts = 0;
+    queue.push(legacy);
+    save('queue', queue);
+  }
+  return queue;
+}
+
+function enqueue(op) {
+  op.id = Date.now() + '-' + Math.random();
+  op.attempts = 0;
+  // A newer operation for a slot replaces any older one that is not already
+  // being sent.
+  var queue = loadQueue().filter(function(o) {
+    return o.slot !== op.slot || o.id === busy;
+  });
+  queue.push(op);
+  save('queue', queue);
+
+  var thumbs = load('thumbs', {});
+  if (op.op === 'set' && op.thumb) {
+    thumbs[op.slot] = op.thumb;
+  } else {
+    delete thumbs[op.slot];
+  }
+  save('thumbs', thumbs);
+}
+
+function buildMessages(op) {
+  if (op.op === 'clear') {
+    return [{ Cmd: CMD_CLEAR, Slot: op.slot }];
+  }
+  var bytes = base64Decode(op.data);
   var chunkSize = watchInfo.chunkSize;
   var messages = [{
     Cmd: CMD_BEGIN,
-    Width: image.width,
-    Height: image.height,
-    Round: image.round,
+    Slot: op.slot,
+    Width: op.width,
+    Height: op.height,
+    Round: op.round,
     Size: bytes.length,
     Checksum: fnv1a(bytes)
   }];
@@ -139,27 +185,113 @@ function sendPending() {
     });
   }
   messages.push({ Cmd: CMD_END });
+  return messages;
+}
 
+// Sends the next queued operation. The watch answers each one with DONE,
+// which removes it from the queue and continues with the next.
+function processQueue() {
+  if (!watchInfo || busy) {
+    return;
+  }
+  var queue = loadQueue();
+  var op = queue[0];
+  if (!op) {
+    return;
+  }
+  if (op.op === 'set' && (op.width !== watchInfo.width || op.height !== watchInfo.height ||
+                          op.round !== watchInfo.round)) {
+    console.log('Image for slot ' + op.slot + ' does not match this watch, discarding');
+    save('queue', queue.slice(1));
+    processQueue();
+    return;
+  }
+
+  var id = op.id;
   var start = Date.now();
-  sending = image.data;
-  console.log('Sending ' + bytes.length + ' bytes in ' + chunkSize + ' byte chunks');
-  sendAll(messages, function(err) {
+  busy = id;
+  console.log('Sending ' + op.op + ' for slot ' + op.slot);
+  sendAll(buildMessages(op), function(err) {
     if (err) {
-      console.log('Image transfer failed: ' + JSON.stringify(err));
-    } else {
-      console.log('Image sent in ' + (Date.now() - start) + ' ms');
+      // Usually a lost connection; retried the next time the app opens.
+      console.log('Transfer failed: ' + JSON.stringify(err));
+      busy = null;
+      return;
     }
-    // On success the watch answers END with DONE, which clears `sending`.
-    if (err) {
-      sending = false;
-    } else {
-      setTimeout(function() {
-        if (sending === image.data) {
-          sending = false;
-        }
-      }, 10000);
-    }
+    console.log('Sent in ' + (Date.now() - start) + ' ms');
+    setTimeout(function() {
+      if (busy === id) {
+        busy = null;
+      }
+    }, 10000);
   });
+}
+
+function handleDone(msg) {
+  var queue = loadQueue();
+  var op = queue[0];
+  if (!busy || !op || op.id !== busy || op.slot !== msg.Slot) {
+    return;
+  }
+  busy = null;
+  var slots = load('slots', 0);
+  if (msg.Status === 1) {
+    console.log('Watch finished ' + op.op + ' for slot ' + op.slot);
+    queue.shift();
+    slots = op.op === 'set' ? slots | (1 << op.slot) : slots & ~(1 << op.slot);
+    save('slots', slots);
+    save('queue', queue);
+    processQueue();
+  } else {
+    // Leave it for the next launch rather than retrying in a loop.
+    op.attempts++;
+    console.log('Watch rejected ' + op.op + ' for slot ' + op.slot);
+    if (op.attempts >= MAX_ATTEMPTS) {
+      queue.shift();
+    }
+    save('queue', queue);
+  }
+}
+
+function handleReady(msg) {
+  watchInfo = {
+    width: msg.Width,
+    height: msg.Height,
+    round: msg.Round,
+    chunkSize: msg.ChunkSize
+  };
+  save('slots', msg.Slots);
+  // Forget thumbnails of slots the watch no longer has, unless an image for
+  // that slot is still on its way.
+  var queue = loadQueue();
+  var thumbs = load('thumbs', {});
+  for (var slot = 0; slot < SLOT_COUNT; slot++) {
+    var queued = queue.some(function(o) { return o.slot === slot && o.op === 'set'; });
+    if (!(msg.Slots & (1 << slot)) && !queued) {
+      delete thumbs[slot];
+    }
+  }
+  save('thumbs', thumbs);
+  processQueue();
+}
+
+// What the config page shows for each slot: queued operations win over the
+// last state the watch reported.
+function slotSummary() {
+  var slots = load('slots', 0);
+  var thumbs = load('thumbs', {});
+  var queue = loadQueue();
+  var summary = [];
+  for (var slot = 0; slot < SLOT_COUNT; slot++) {
+    var filled = !!(slots & (1 << slot)) || !!thumbs[slot];
+    queue.forEach(function(o) {
+      if (o.slot === slot) {
+        filled = o.op === 'set';
+      }
+    });
+    summary.push({ filled: filled, thumb: filled ? thumbs[slot] || null : null });
+  }
+  return summary;
 }
 
 Pebble.addEventListener('ready', function() {
@@ -169,60 +301,51 @@ Pebble.addEventListener('ready', function() {
 Pebble.addEventListener('appmessage', function(e) {
   var msg = e.payload;
   if (msg.Cmd === CMD_READY) {
-    watchInfo = {
-      width: msg.Width,
-      height: msg.Height,
-      round: msg.Round,
-      chunkSize: msg.ChunkSize
-    };
-    sendPending();
+    handleReady(msg);
   } else if (msg.Cmd === CMD_DONE) {
-    var pending = loadPending();
-    if (msg.Status === 1) {
-      console.log('Watch stored image');
-      if (pending && pending.data === sending) {
-        localStorage.removeItem('pending');
-      }
-    } else {
-      console.log('Watch rejected image');
-    }
-    // Send an image chosen while this transfer was in progress.
-    var retry = sending && pending && pending.data !== sending;
-    sending = false;
-    if (retry) {
-      sendPending();
-    }
+    handleDone(msg);
   }
 });
 
 Pebble.addEventListener('showConfiguration', function() {
   var info = screenInfo();
   Pebble.openURL(CONFIG_URL + '?width=' + info.width + '&height=' + info.height +
-                 '&round=' + info.round);
+                 '&round=' + info.round + '#' +
+                 encodeURIComponent(JSON.stringify({ slots: slotSummary() })));
 });
 
 Pebble.addEventListener('webviewclosed', function(e) {
   if (!e || !e.response) {
     return;
   }
-  var image;
+  var result;
   try {
-    image = JSON.parse(decodeURIComponent(e.response));
+    result = JSON.parse(decodeURIComponent(e.response));
   } catch (err) {
     console.log('Invalid config response: ' + err);
     return;
   }
-  if (!image || typeof image.data !== 'string') {
+  if (!result || typeof result.slot !== 'number' || result.slot < 0 ||
+      result.slot >= SLOT_COUNT) {
     return;
   }
-  localStorage.setItem('pending', JSON.stringify({
-    width: image.width,
-    height: image.height,
-    round: image.round,
-    data: image.data
-  }));
+  if (result.op === 'clear') {
+    enqueue({ op: 'clear', slot: result.slot });
+  } else if (result.op === 'set' && typeof result.data === 'string') {
+    enqueue({
+      op: 'set',
+      slot: result.slot,
+      width: result.width,
+      height: result.height,
+      round: result.round,
+      data: result.data,
+      thumb: typeof result.thumb === 'string' ? result.thumb : null
+    });
+  } else {
+    return;
+  }
   if (watchInfo) {
-    sendPending();
+    processQueue();
   } else {
     send({ Cmd: CMD_HELLO }, MAX_RETRIES);
   }

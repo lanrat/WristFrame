@@ -33,7 +33,24 @@
   button.save { background: var(--accent); color: #fff; }
   button.save:disabled { opacity: 0.4; }
   button.cancel { background: transparent; color: inherit; }
-  input[type=file] { display: none; }
+  button.clear { background: transparent; color: var(--accent); }
+  .slots { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  .slot {
+    position: relative; aspect-ratio: 200 / 228; padding: 0; margin: 0;
+    border: 2px solid transparent; border-radius: 8px; overflow: hidden;
+    background: #ddd; color: #666; font-size: 13px;
+  }
+  @media (prefers-color-scheme: dark) { .slot { background: #333; color: #999; } }
+  .slot.round { aspect-ratio: 1; }
+  .slot.selected { border-color: var(--accent); }
+  .slot img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .slot.round img { border-radius: 50%; }
+  .slot .num {
+    position: absolute; left: 4px; top: 4px; min-width: 18px; padding: 1px 4px;
+    border-radius: 9px; background: rgba(0, 0, 0, 0.6); color: #fff; font-size: 12px;
+  }
+  .help { margin: 8px 0 0; font-size: 14px; opacity: 0.7; text-align: center; }
+  [hidden], input[type=file] { display: none !important; }
   footer { margin-top: 24px; text-align: center; font-size: 14px; opacity: 0.7; }
   footer a { color: inherit; }
 </style>
@@ -41,13 +58,17 @@
 <body>
 <h1>WristFrame</h1>
 
+<div class="slots" id="slots"></div>
+<p class="help">Press Up and Down on the watch to switch images.</p>
+
 <div class="preview">
-  <p class="placeholder" id="placeholder">No image selected</p>
+  <p class="placeholder" id="placeholder"></p>
   <canvas id="preview" hidden></canvas>
 </div>
 
 <label class="picker">Choose photo<input type="file" id="file" accept="image/*"></label>
 <button class="save" id="save" disabled>Send to watch</button>
+<button class="clear" id="clear" hidden>Clear slot</button>
 <button class="cancel" id="cancel">Cancel</button>
 
 <footer>
@@ -64,12 +85,30 @@
   var ROUND = params.get('round') === '1' ? 1 : 0;
   var RETURN_TO = params.get('return_to') || 'pebblejs://close#';
   var PREVIEW_SCALE = 1;
+  var SLOT_COUNT = 4;
+  var THUMB_WIDTH = 48;
 
   var fileInput = document.getElementById('file');
   var saveButton = document.getElementById('save');
   var preview = document.getElementById('preview');
   var placeholder = document.getElementById('placeholder');
+  var clearButton = document.getElementById('clear');
+  var slotsEl = document.getElementById('slots');
   var packed = null;
+  var thumb = null;
+
+  // Slot state passed by the app in the URL hash: {slots: [{filled, thumb}]}.
+  var slots = [];
+  try {
+    slots = JSON.parse(decodeURIComponent(location.hash.slice(1))).slots || [];
+  } catch (e) {}
+  for (var n = 0; n < SLOT_COUNT; n++) {
+    slots[n] = slots[n] || { filled: false, thumb: null };
+  }
+  var selected = 0;
+  for (var m = 0; m < SLOT_COUNT; m++) {
+    if (!slots[m].filled) { selected = m; break; }
+  }
 
   // Visible pixel columns [x0, x1) of row y. Must match prv_row_span in
   // src/c/main.c: on round displays keep pixels whose centre lies within the
@@ -177,12 +216,22 @@
     return new Uint8Array(bytes);
   }
 
+  // URL-safe base64 (no '+', '/' or '='), so encodeURIComponent leaves it
+  // as is and the return URL stays as short as possible.
+  function toUrlSafe(b64) {
+    return b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+
+  function fromUrlSafe(b64) {
+    return b64.replace(/-/g, '+').replace(/_/g, '/');
+  }
+
   function base64(bytes) {
     var s = '';
     for (var i = 0; i < bytes.length; i += 0x8000) {
       s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
     }
-    return btoa(s);
+    return toUrlSafe(btoa(s));
   }
 
   function showPreview(image) {
@@ -198,6 +247,55 @@
     placeholder.hidden = true;
   }
 
+  // Small JPEG of the converted image, shown on the slot tiles next time.
+  // Returned as URL-safe base64 without the data: prefix.
+  function makeThumb() {
+    var c = document.createElement('canvas');
+    c.width = THUMB_WIDTH;
+    c.height = Math.round(THUMB_WIDTH * HEIGHT / WIDTH);
+    var ctx = c.getContext('2d');
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(preview, 0, 0, c.width, c.height);
+    return toUrlSafe(c.toDataURL('image/jpeg', 0.6).split(',')[1]);
+  }
+
+  function render() {
+    slotsEl.textContent = '';
+    slots.forEach(function (slot, i) {
+      var tile = document.createElement('button');
+      tile.className = 'slot' + (ROUND ? ' round' : '') + (i === selected ? ' selected' : '');
+      tile.setAttribute('aria-label', 'Slot ' + (i + 1));
+      if (slot.thumb) {
+        var img = document.createElement('img');
+        img.src = 'data:image/jpeg;base64,' + fromUrlSafe(slot.thumb);
+        img.alt = '';
+        tile.appendChild(img);
+      } else {
+        tile.appendChild(document.createTextNode(slot.filled ? 'Image' : 'Empty'));
+      }
+      var num = document.createElement('span');
+      num.className = 'num';
+      num.textContent = i + 1;
+      tile.appendChild(num);
+      tile.addEventListener('click', function () {
+        selected = i;
+        render();
+      });
+      slotsEl.appendChild(tile);
+    });
+
+    var label = 'slot ' + (selected + 1);
+    saveButton.textContent = 'Send to ' + label;
+    clearButton.textContent = 'Clear ' + label;
+    clearButton.hidden = !slots[selected].filled || !!packed;
+    if (!packed) {
+      placeholder.textContent = slots[selected].filled
+        ? 'Choose a photo to replace ' + label
+        : 'Choose a photo for ' + label;
+    }
+  }
+
   fileInput.addEventListener('change', function () {
     var file = fileInput.files && fileInput.files[0];
     if (!file) return;
@@ -208,7 +306,9 @@
       var pixels = dither(image);
       packed = pack(pixels);
       showPreview(image);
+      thumb = makeThumb();
       saveButton.disabled = false;
+      render();
     }).catch(function (err) {
       packed = null;
       preview.hidden = true;
@@ -219,13 +319,23 @@
 
   saveButton.addEventListener('click', function () {
     if (!packed) return;
-    var result = { width: WIDTH, height: HEIGHT, round: ROUND, data: base64(packed) };
+    var result = {
+      op: 'set', slot: selected, width: WIDTH, height: HEIGHT, round: ROUND,
+      data: base64(packed), thumb: thumb
+    };
+    location.href = RETURN_TO + encodeURIComponent(JSON.stringify(result));
+  });
+
+  clearButton.addEventListener('click', function () {
+    var result = { op: 'clear', slot: selected };
     location.href = RETURN_TO + encodeURIComponent(JSON.stringify(result));
   });
 
   document.getElementById('cancel').addEventListener('click', function () {
     location.href = RETURN_TO;
   });
+
+  render();
 })();
 </script>
 </body>

@@ -4,9 +4,13 @@
 // 64-colour pixels, 6 bits each (rrggbb), packed MSB-first, row-major.
 // On round displays only the pixels inside the visible circle are included
 // (see prv_row_span, mirrored in config/index.html).
+//
+// Up to SLOT_COUNT images are stored; Up/Down switch between them.
 
-#define META_KEY 1
-#define DATA_KEY_BASE 100
+#define SLOT_COUNT 4
+#define META_KEY(slot) (1 + (slot))
+#define CURRENT_KEY 10
+#define DATA_KEY(slot, record) (100 + (slot) * 200 + (record))
 #define META_VERSION 1
 #define RECORD_SIZE PERSIST_DATA_MAX_LENGTH
 #define INBOX_SIZE_CAP (2048 + 64)
@@ -14,11 +18,12 @@
 
 enum {
   CMD_HELLO = 1,  // phone -> watch: request READY
-  CMD_READY = 2,  // watch -> phone: screen info + chunk size
+  CMD_READY = 2,  // watch -> phone: screen info, chunk size, filled slots
   CMD_BEGIN = 3,  // phone -> watch: new image header
   CMD_CHUNK = 4,  // phone -> watch: image data
   CMD_END = 5,    // phone -> watch: transfer complete
-  CMD_DONE = 6,   // watch -> phone: result of transfer, sent once per END
+  CMD_DONE = 6,   // watch -> phone: result of END or CLEAR
+  CMD_CLEAR = 7,  // phone -> watch: delete a slot
 };
 
 typedef struct __attribute__((packed)) {
@@ -49,9 +54,16 @@ static TextLayer *s_hint_layer;
 static GBitmap *s_bitmap;
 static Decoder s_decoder;
 
+// Bit n set when slot n holds a complete image.
+static uint8_t s_filled;
+// Slot on screen, or -1 when none.
+static int s_current = -1;
+static int s_saved_current = -1;
+
 static struct {
   bool active;
   bool persist;
+  int slot;
   ImageMeta meta;
   uint32_t offset;
   uint32_t checksum;
@@ -165,10 +177,15 @@ static void prv_discard_image(void) {
     gbitmap_destroy(s_bitmap);
     s_bitmap = NULL;
   }
+  s_current = -1;
   prv_show_image(false);
 }
 
 // --- Persistent storage ------------------------------------------------------
+
+static bool prv_valid_slot(int32_t slot) {
+  return slot >= 0 && slot < SLOT_COUNT;
+}
 
 static bool prv_meta_valid(const ImageMeta *meta) {
   const GRect bounds = layer_get_bounds(window_get_root_layer(s_window));
@@ -177,37 +194,55 @@ static bool prv_meta_valid(const ImageMeta *meta) {
          meta->size == prv_packed_size(meta->width, meta->height, meta->round);
 }
 
-static void prv_load_image(void) {
+static bool prv_read_meta(int slot, ImageMeta *meta) {
+  return persist_read_data(META_KEY(slot), meta, sizeof(*meta)) == sizeof(*meta) &&
+         prv_meta_valid(meta);
+}
+
+static bool prv_load_slot(int slot) {
   ImageMeta meta;
-  if (persist_read_data(META_KEY, &meta, sizeof(meta)) != sizeof(meta) || !prv_meta_valid(&meta)) {
-    return;
-  }
-  if (!prv_bitmap_create(meta.width, meta.height, meta.round)) {
-    return;
+  if (!prv_read_meta(slot, &meta) || !prv_bitmap_create(meta.width, meta.height, meta.round)) {
+    return false;
   }
   uint8_t buf[RECORD_SIZE];
   uint32_t checksum = FNV_OFFSET;
   for (uint32_t offset = 0; offset < meta.size; offset += RECORD_SIZE) {
     const uint32_t len = meta.size - offset < RECORD_SIZE ? meta.size - offset : RECORD_SIZE;
-    if (persist_read_data(DATA_KEY_BASE + offset / RECORD_SIZE, buf, len) != (int)len) {
-      APP_LOG(APP_LOG_LEVEL_WARNING, "Stored image is incomplete");
-      prv_discard_image();
-      return;
+    if (persist_read_data(DATA_KEY(slot, offset / RECORD_SIZE), buf, len) != (int)len) {
+      APP_LOG(APP_LOG_LEVEL_WARNING, "Slot %d is incomplete", slot);
+      return false;
     }
     checksum = prv_fnv1a(checksum, buf, len);
     prv_decoder_feed(&s_decoder, buf, len);
   }
   if (checksum != meta.checksum) {
-    APP_LOG(APP_LOG_LEVEL_WARNING, "Stored image checksum mismatch");
-    prv_discard_image();
-    return;
+    APP_LOG(APP_LOG_LEVEL_WARNING, "Slot %d checksum mismatch", slot);
+    return false;
   }
-  prv_show_image(true);
+  return true;
+}
+
+// Shows the first loadable filled slot, starting at `slot` and stepping by
+// `dir` (wrapping). Slots that fail to load are marked empty.
+static void prv_show_from(int slot, int dir) {
+  for (int i = 0; i < SLOT_COUNT; i++) {
+    const int s = (slot + dir * i + SLOT_COUNT * SLOT_COUNT) % SLOT_COUNT;
+    if (!(s_filled & (1 << s))) {
+      continue;
+    }
+    if (prv_load_slot(s)) {
+      s_current = s;
+      prv_show_image(true);
+      return;
+    }
+    s_filled &= ~(1 << s);
+  }
+  prv_discard_image();
 }
 
 // --- AppMessage --------------------------------------------------------------
 
-static void prv_send(uint8_t cmd, int32_t status) {
+static void prv_send(uint8_t cmd, int32_t status, int32_t slot) {
   DictionaryIterator *iter;
   if (app_message_outbox_begin(&iter) != APP_MSG_OK) {
     return;
@@ -221,8 +256,10 @@ static void prv_send(uint8_t cmd, int32_t status) {
     dict_write_int32(iter, MESSAGE_KEY_Height, bounds.size.h);
     dict_write_int32(iter, MESSAGE_KEY_Round, PBL_IF_ROUND_ELSE(1, 0));
     dict_write_int32(iter, MESSAGE_KEY_ChunkSize, ((capped - 64) / RECORD_SIZE) * RECORD_SIZE);
+    dict_write_int32(iter, MESSAGE_KEY_Slots, s_filled);
   } else {
     dict_write_int32(iter, MESSAGE_KEY_Status, status);
+    dict_write_int32(iter, MESSAGE_KEY_Slot, slot);
   }
   app_message_outbox_send();
 }
@@ -233,6 +270,7 @@ static int32_t prv_int(DictionaryIterator *iter, uint32_t key) {
 }
 
 static void prv_handle_begin(DictionaryIterator *iter) {
+  const int32_t slot = prv_int(iter, MESSAGE_KEY_Slot);
   ImageMeta meta = {
     .version = META_VERSION,
     .width = prv_int(iter, MESSAGE_KEY_Width),
@@ -242,21 +280,24 @@ static void prv_handle_begin(DictionaryIterator *iter) {
     .checksum = prv_int(iter, MESSAGE_KEY_Checksum),
   };
   s_rx.active = false;
-  if (!prv_meta_valid(&meta)) {
-    APP_LOG(APP_LOG_LEVEL_ERROR, "Rejected image %dx%d size %d", meta.width, meta.height,
-            (int)meta.size);
+  if (!prv_valid_slot(slot) || !prv_meta_valid(&meta)) {
+    APP_LOG(APP_LOG_LEVEL_ERROR, "Rejected image for slot %d: %dx%d size %d", (int)slot,
+            meta.width, meta.height, (int)meta.size);
     return;
   }
   if (!prv_bitmap_create(meta.width, meta.height, meta.round)) {
-    prv_show_image(false);
+    prv_discard_image();
     return;
   }
-  // Invalidate the stored image until the new one is complete.
-  if (persist_exists(META_KEY)) {
-    persist_delete(META_KEY);
+  // Invalidate the slot until the new image is complete.
+  if (persist_exists(META_KEY(slot))) {
+    persist_delete(META_KEY(slot));
   }
+  s_filled &= ~(1 << slot);
+  s_current = slot;
   s_rx.active = true;
   s_rx.persist = persist_get_max_size() >= meta.size + 1024;
+  s_rx.slot = slot;
   s_rx.meta = meta;
   s_rx.offset = 0;
   s_rx.checksum = FNV_OFFSET;
@@ -278,7 +319,7 @@ static void prv_handle_chunk(DictionaryIterator *iter) {
   if (s_rx.persist) {
     for (uint16_t i = 0; i < len; i += RECORD_SIZE) {
       const uint16_t n = len - i < RECORD_SIZE ? len - i : RECORD_SIZE;
-      const uint32_t key = DATA_KEY_BASE + (s_rx.offset + i) / RECORD_SIZE;
+      const uint32_t key = DATA_KEY(s_rx.slot, (s_rx.offset + i) / RECORD_SIZE);
       if (persist_write_data(key, buf + i, n) != n) {
         APP_LOG(APP_LOG_LEVEL_WARNING, "Persist write failed");
         s_rx.persist = false;
@@ -295,22 +336,47 @@ static void prv_handle_chunk(DictionaryIterator *iter) {
 static void prv_handle_end(void) {
   const bool ok = s_rx.active && s_rx.offset == s_rx.meta.size &&
                   s_rx.checksum == s_rx.meta.checksum;
+  const int slot = s_rx.slot;
   s_rx.active = false;
   if (!ok) {
     APP_LOG(APP_LOG_LEVEL_ERROR, "Image transfer failed");
-    prv_send(CMD_DONE, 0);
+    prv_send(CMD_DONE, 0, slot);
+    // Replace the partial image, unless a button press already moved away.
+    if (s_current == slot) {
+      prv_show_from(slot, 1);
+    }
     return;
   }
-  if (s_rx.persist) {
-    persist_write_data(META_KEY, &s_rx.meta, sizeof(s_rx.meta));
+  // The image stays on screen either way, but only a stored image counts as
+  // done; otherwise the phone retries on a later launch.
+  const bool stored = s_rx.persist && persist_write_data(META_KEY(slot), &s_rx.meta,
+                                                         sizeof(s_rx.meta)) == (int)sizeof(s_rx.meta);
+  if (stored) {
+    s_filled |= 1 << slot;
   }
-  prv_send(CMD_DONE, 1);
+  prv_send(CMD_DONE, stored ? 1 : 0, slot);
+}
+
+static void prv_handle_clear(DictionaryIterator *iter) {
+  const int32_t slot = prv_int(iter, MESSAGE_KEY_Slot);
+  if (!prv_valid_slot(slot)) {
+    prv_send(CMD_DONE, 0, slot);
+    return;
+  }
+  if (persist_exists(META_KEY(slot))) {
+    persist_delete(META_KEY(slot));
+  }
+  s_filled &= ~(1 << slot);
+  if (s_current == slot) {
+    prv_show_from(slot, 1);
+  }
+  prv_send(CMD_DONE, 1, slot);
 }
 
 static void prv_inbox_received(DictionaryIterator *iter, void *context) {
   switch (prv_int(iter, MESSAGE_KEY_Cmd)) {
     case CMD_HELLO:
-      prv_send(CMD_READY, 0);
+      prv_send(CMD_READY, 0, 0);
       break;
     case CMD_BEGIN:
       prv_handle_begin(iter);
@@ -321,10 +387,42 @@ static void prv_inbox_received(DictionaryIterator *iter, void *context) {
     case CMD_END:
       prv_handle_end();
       break;
+    case CMD_CLEAR:
+      prv_handle_clear(iter);
+      break;
   }
 }
 
 // --- UI ----------------------------------------------------------------------
+
+static void prv_step(int dir) {
+  // A button press abandons any transfer in progress; the phone retries it
+  // the next time the app opens.
+  s_rx.active = false;
+  const int from = s_current < 0 ? 0 : s_current;
+  for (int i = 1; i <= SLOT_COUNT; i++) {
+    const int s = (from + dir * i + SLOT_COUNT * SLOT_COUNT) % SLOT_COUNT;
+    if (s_filled & (1 << s)) {
+      if (s != s_current || !s_bitmap) {
+        prv_show_from(s, dir);
+      }
+      return;
+    }
+  }
+}
+
+static void prv_up_click(ClickRecognizerRef recognizer, void *context) {
+  prv_step(-1);
+}
+
+static void prv_down_click(ClickRecognizerRef recognizer, void *context) {
+  prv_step(1);
+}
+
+static void prv_click_config(void *context) {
+  window_single_click_subscribe(BUTTON_ID_UP, prv_up_click);
+  window_single_click_subscribe(BUTTON_ID_DOWN, prv_down_click);
+}
 
 static void prv_image_update_proc(Layer *layer, GContext *ctx) {
   if (!s_bitmap) {
@@ -360,14 +458,23 @@ static void prv_window_unload(Window *window) {
 static void prv_init(void) {
   s_window = window_create();
   window_set_background_color(s_window, GColorBlack);
+  window_set_click_config_provider(s_window, prv_click_config);
   window_set_window_handlers(s_window, (WindowHandlers){
                                            .load = prv_window_load,
                                            .unload = prv_window_unload,
                                        });
   window_stack_push(s_window, false);
 
-  prv_load_image();
-  prv_show_image(s_bitmap != NULL);
+  for (int slot = 0; slot < SLOT_COUNT; slot++) {
+    ImageMeta meta;
+    if (prv_read_meta(slot, &meta)) {
+      s_filled |= 1 << slot;
+    }
+  }
+  if (persist_exists(CURRENT_KEY)) {
+    s_saved_current = persist_read_int(CURRENT_KEY);
+  }
+  prv_show_from(prv_valid_slot(s_saved_current) ? s_saved_current : 0, 1);
 
   app_message_register_inbox_received(prv_inbox_received);
   const uint32_t inbox = app_message_inbox_size_maximum();
@@ -375,6 +482,11 @@ static void prv_init(void) {
 }
 
 static void prv_deinit(void) {
+  // Only write when changed: every persist write adds a record that slows
+  // later persist calls until the firmware compacts the file.
+  if (s_current >= 0 && s_current != s_saved_current) {
+    persist_write_int(CURRENT_KEY, s_current);
+  }
   window_destroy(s_window);
   if (s_bitmap) {
     gbitmap_destroy(s_bitmap);

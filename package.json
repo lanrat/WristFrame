@@ -30,7 +30,9 @@
       "Data",
       "Checksum",
       "ChunkSize",
-      "Status"
+      "Status",
+      "Slot",
+      "Slots"
     ],
     "resources": {
       "media": []

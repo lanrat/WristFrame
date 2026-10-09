@@ -1,6 +1,7 @@
 # WristFrame
 
-A Pebble watchapp that shows one image full screen, and nothing else.
+A Pebble watchapp that shows a photo full screen, and nothing else. It holds up
+to 4 photos; press Up and Down on the watch to switch between them.
 
 Supported watches: **Pebble Time 2** (`emery`, 200×228) and **Pebble Round 2**
 (`gabbro`, 260×260 round).
@@ -9,10 +10,12 @@ Supported watches: **Pebble Time 2** (`emery`, 200×228) and **Pebble Round 2**
 
 1. Install the `.pbw` (from the latest [GitHub Actions run](../../actions) or
    [release](../../releases)) with the Pebble app.
-2. Open the app's settings in the Pebble app, choose a photo and tap
-   **Send to watch**.
-3. The image is stored on the watch and shown every time the app opens, even
-   when the phone is not connected.
+2. Open the app's settings in the Pebble app, tap one of the 4 slots, choose a
+   photo and tap **Send to slot N**. Repeat for other slots, or use
+   **Clear slot N** to empty a slot.
+3. Photos are stored on the watch, so they are available even when the phone
+   is not connected. Press **Up** and **Down** to switch between them. The app
+   reopens on the last photo shown.
 
 ## How it works
 
@@ -26,14 +29,22 @@ All image processing happens on the phone, in the settings page
   circle are left out (about 21% less data).
 
 The packed image is about 34 KB on the Time 2 and 40 KB on the Round 2. The
-phone-side JavaScript ([`src/pkjs/index.js`](src/pkjs/index.js)) sends it to
+settings page returns it to the app as URL-safe base64, together with a small
+thumbnail for the slot tiles. The phone-side JavaScript
+([`src/pkjs/index.js`](src/pkjs/index.js)) queues each change and sends it to
 the watch in 2 KB AppMessage chunks. If a transfer is interrupted, it is
 retried the next time the app opens.
 
 The watch ([`src/c/main.c`](src/c/main.c)) decodes chunks as they arrive. It
 saves them to persistent storage in 256-byte records, plus a header with a
-checksum that is written only once the whole image has arrived. On launch it
-reads the image back from storage. This needs firmware with the 1 MB per-app
+checksum that is written only once the whole image has arrived. Each slot has
+its own range of storage keys. On launch it reads back the last photo shown.
+
+The slot count is capped at 4 because persistent storage slows down as it
+fills with records, including the dead records left behind when a photo is
+replaced ([PebbleOS issue #2106](https://github.com/coredevices/PebbleOS/issues/2106)).
+If the app becomes slow to open after many photo changes, reinstalling it
+clears the stored data. This needs firmware with the 1 MB per-app
 persistent storage limit (PebbleOS v4.9.171 or later). On older firmware the
 image is shown but not remembered.
 
