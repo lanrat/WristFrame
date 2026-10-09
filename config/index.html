@@ -129,15 +129,46 @@
       var img = new Image();
       var url = URL.createObjectURL(file);
       img.onload = function () { URL.revokeObjectURL(url); resolve(img); };
-      img.onerror = function () { URL.revokeObjectURL(url); reject(new Error('Could not load image')); };
+      img.onerror = function () {
+        URL.revokeObjectURL(url);
+        reject(new Error('Could not read this photo. Try a JPEG or PNG.'));
+      };
       img.src = url;
     });
+  }
+
+  // Large camera photos (12 MP and up) take ~50 MB as full-size bitmaps,
+  // which can exhaust the memory of the Pebble app's settings WebView. Where
+  // supported, decode straight to a reduced size instead; only a few times
+  // the screen size is needed for a sharp result.
+  function decodeImage(file) {
+    if (!window.createImageBitmap) return loadImage(file);
+    var target = Math.max(WIDTH, HEIGHT) * 4;
+    function decodeAt(options) {
+      options.resizeQuality = 'high';
+      options.imageOrientation = 'from-image';
+      return createImageBitmap(file, options);
+    }
+    return decodeAt({ resizeWidth: target }).then(function (bitmap) {
+      if (bitmap.height >= target || bitmap.height >= bitmap.width) return bitmap;
+      // Wide image: the height limits the crop, so size by height instead.
+      bitmap.close();
+      return decodeAt({ resizeHeight: target });
+    }).catch(function () {
+      return loadImage(file);
+    });
+  }
+
+  function formatSize(bytes) {
+    return bytes >= 1048576
+      ? (bytes / 1048576).toFixed(1) + ' MB'
+      : Math.max(1, Math.round(bytes / 1024)) + ' KB';
   }
 
   // Scale the image to cover WIDTH x HEIGHT and crop the overflow evenly.
   // Downscale in halving steps so large photos stay smooth on every browser.
   function coverCrop(img) {
-    var iw = img.naturalWidth, ih = img.naturalHeight;
+    var iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height;
     var scale = Math.max(WIDTH / iw, HEIGHT / ih);
     var sw = WIDTH / scale, sh = HEIGHT / scale;
     var sx = (iw - sw) / 2, sy = (ih - sh) / 2;
@@ -296,13 +327,41 @@
     }
   }
 
+  function showError(message) {
+    packed = null;
+    saveButton.disabled = true;
+    preview.hidden = true;
+    placeholder.hidden = false;
+    placeholder.textContent = message;
+  }
+
+  window.addEventListener('error', function (e) {
+    showError('Something went wrong: ' + (e.message || 'unknown error'));
+  });
+  window.addEventListener('unhandledrejection', function (e) {
+    showError('Something went wrong: ' + ((e.reason && e.reason.message) || e.reason));
+  });
+
+  // Clear the previous choice so picking the same photo again still fires
+  // a change event.
+  fileInput.addEventListener('click', function () {
+    fileInput.value = '';
+  });
+
   fileInput.addEventListener('change', function () {
     var file = fileInput.files && fileInput.files[0];
-    if (!file) return;
+    if (!file) {
+      showError('No photo was received from the Pebble app. Please try again.');
+      return;
+    }
     saveButton.disabled = true;
-    placeholder.textContent = 'Converting…';
-    loadImage(file).then(function (img) {
+    preview.hidden = true;
+    placeholder.hidden = false;
+    placeholder.textContent = 'Loading photo (' + formatSize(file.size) + ')\u2026';
+    decodeImage(file).then(function (img) {
+      placeholder.textContent = 'Converting\u2026';
       var image = coverCrop(img);
+      if (img.close) img.close();
       var pixels = dither(image);
       packed = pack(pixels);
       showPreview(image);
@@ -310,10 +369,7 @@
       saveButton.disabled = false;
       render();
     }).catch(function (err) {
-      packed = null;
-      preview.hidden = true;
-      placeholder.hidden = false;
-      placeholder.textContent = err.message;
+      showError(err.message || String(err));
     });
   });
 
