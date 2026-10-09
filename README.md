@@ -40,7 +40,7 @@ image is shown but not remembered.
 ## Settings page hosting
 
 The settings page is served from GitHub Pages at
-`https://lanrat.github.io/Pebble-image/`. The workflow deploys `config/` on
+`https://lanrat.github.io/WristFrame/`. The workflow deploys `config/` on
 every push to the default branch. Enable it once under **Settings → Pages →
 Source: GitHub Actions**. If you fork the repo, update `CONFIG_URL` in
 `src/pkjs/index.js`.

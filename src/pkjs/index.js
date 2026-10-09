@@ -4,7 +4,7 @@
 // resizes, dithers to the 64-colour palette and packs the pixels. This file
 // only moves those bytes to the watch and retries interrupted transfers.
 
-var CONFIG_URL = 'https://lanrat.github.io/Pebble-image/';
+var CONFIG_URL = 'https://lanrat.github.io/WristFrame/';
 
 var CMD_HELLO = 1;
 var CMD_READY = 2;
