@@ -1,0 +1,39 @@
+{
+  "name": "pebble-image",
+  "author": "lanrat",
+  "version": "1.0.0",
+  "keywords": ["pebble-app"],
+  "private": true,
+  "dependencies": {},
+  "pebble": {
+    "displayName": "Image",
+    "uuid": "8d70d919-626f-464f-a228-eb22712ecdda",
+    "sdkVersion": "3",
+    "enableMultiJS": true,
+    "targetPlatforms": [
+      "emery",
+      "gabbro"
+    ],
+    "watchapp": {
+      "watchface": false
+    },
+    "capabilities": [
+      "configurable"
+    ],
+    "messageKeys": [
+      "Cmd",
+      "Width",
+      "Height",
+      "Round",
+      "Size",
+      "Offset",
+      "Data",
+      "Checksum",
+      "ChunkSize",
+      "Status"
+    ],
+    "resources": {
+      "media": []
+    }
+  }
+}
