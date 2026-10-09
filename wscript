@@ -21,6 +21,7 @@ def configure(ctx):
     Universal configuration: add your change prior to calling ctx.load('pebble_sdk').
     """
     ctx.load('pebble_sdk')
+    ctx.env.BUNDLE_NAME = 'WristFrame.pbw'
 
 
 def build(ctx):

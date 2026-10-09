@@ -1,4 +1,4 @@
-# Pebble Image
+# WristFrame
 
 A Pebble watchapp that shows one image full screen, and nothing else.
 

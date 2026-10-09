@@ -28,7 +28,7 @@ jobs:
 
       - uses: actions/upload-artifact@v7
         with:
-          name: pebble-image
+          name: WristFrame
           path: build/*.pbw
           if-no-files-found: error
 

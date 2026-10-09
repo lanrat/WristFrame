@@ -1,12 +1,12 @@
 {
-  "name": "pebble-image",
+  "name": "wristframe",
   "author": "lanrat",
   "version": "1.0.0",
   "keywords": ["pebble-app"],
   "private": true,
   "dependencies": {},
   "pebble": {
-    "displayName": "Image",
+    "displayName": "WristFrame",
     "uuid": "8d70d919-626f-464f-a228-eb22712ecdda",
     "sdkVersion": "3",
     "enableMultiJS": true,
