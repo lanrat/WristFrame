@@ -66,7 +66,7 @@
   <canvas id="preview" hidden></canvas>
 </div>
 
-<label class="picker">Choose photo<input type="file" id="file" accept="image/*"></label>
+<label class="picker">Choose photo<input type="file" id="file" accept="image/*,.heic,.heif"></label>
 <button class="save" id="save" disabled>Send to watch</button>
 <button class="clear" id="clear" hidden>Clear slot</button>
 <button class="cancel" id="cancel">Cancel</button>
@@ -139,23 +139,123 @@
 
   // Large camera photos (12 MP and up) take ~50 MB as full-size bitmaps,
   // which can exhaust the memory of the Pebble app's settings WebView. Where
-  // supported, decode straight to a reduced size instead; only a few times
-  // the screen size is needed for a sharp result.
-  function decodeImage(file) {
-    if (!window.createImageBitmap) return loadImage(file);
+  // supported, shrink to a few times the screen size (all a sharp result
+  // needs) as part of decoding. `source` is a Blob or ImageData.
+  function shrink(source) {
     var target = Math.max(WIDTH, HEIGHT) * 4;
     function decodeAt(options) {
       options.resizeQuality = 'high';
       options.imageOrientation = 'from-image';
-      return createImageBitmap(file, options);
+      return createImageBitmap(source, options);
     }
     return decodeAt({ resizeWidth: target }).then(function (bitmap) {
       if (bitmap.height >= target || bitmap.height >= bitmap.width) return bitmap;
       // Wide image: the height limits the crop, so size by height instead.
       bitmap.close();
       return decodeAt({ resizeHeight: target });
-    }).catch(function () {
+    });
+  }
+
+  function decodeNative(file) {
+    if (!window.createImageBitmap) return loadImage(file);
+    return shrink(file).catch(function () {
       return loadImage(file);
+    });
+  }
+
+  // HEIF (the iPhone camera's default format) only decodes natively in
+  // Safari. Elsewhere, decode it with libheif, downloaded only when needed.
+  var HEIF_DECODER_URL =
+    'https://cdn.jsdelivr.net/npm/libheif-js@1.23.2/libheif-wasm/libheif-bundle.js';
+  var HEIF_DECODER_SRI = 'sha384-39BRDvCV5eZ5AgrY3Nr01nkQ/yIWMpfKufwt1PG2rnp3m/0IfzgyMosM0NUb7Pmf';
+  var HEIF_BRANDS = ['heic', 'heix', 'heim', 'heis', 'hevc', 'hevx', 'hevm', 'hevs', 'mif1', 'msf1'];
+  var heifDecoder = null;
+
+  // HEIF files start with an ISO BMFF 'ftyp' box naming a HEIF brand.
+  function isHeif(file) {
+    return file.slice(0, 12).arrayBuffer().then(function (buf) {
+      var b = new Uint8Array(buf);
+      var box = String.fromCharCode.apply(null, b.subarray(4, 8));
+      var brand = String.fromCharCode.apply(null, b.subarray(8, 12));
+      return box === 'ftyp' && HEIF_BRANDS.indexOf(brand) >= 0;
+    }).catch(function () {
+      return false;
+    });
+  }
+
+  function loadHeifDecoder() {
+    if (!heifDecoder) {
+      heifDecoder = new Promise(function (resolve, reject) {
+        var script = document.createElement('script');
+        script.src = HEIF_DECODER_URL;
+        script.integrity = HEIF_DECODER_SRI;
+        script.crossOrigin = 'anonymous';
+        script.onload = function () {
+          try {
+            resolve(window.libheif());
+          } catch (e) {
+            reject(e);
+          }
+        };
+        script.onerror = function () {
+          heifDecoder = null;
+          reject(new Error('Could not download the HEIF decoder. Check your connection and try again.'));
+        };
+        document.head.appendChild(script);
+      });
+    }
+    return heifDecoder;
+  }
+
+  function tooLarge(w, h) {
+    return new Error('This photo is too large to convert on this device (' +
+      Math.round(w * h / 1e6) + ' MP). Try a smaller copy, such as a screenshot of it.');
+  }
+
+  function decodeHeif(file) {
+    setStatus('Downloading the HEIF decoder\u2026');
+    return Promise.all([loadHeifDecoder(), file.arrayBuffer()]).then(function (r) {
+      setStatus('Decoding HEIF photo. Large photos can take up to a minute\u2026');
+      // Let the status paint; decoding blocks the page for a few seconds.
+      return new Promise(function (resolve) { setTimeout(resolve, 50); }).then(function () {
+        var images = new r[0].HeifDecoder().decode(new Uint8Array(r[1]));
+        var image = images.filter(function (i) { return i.is_primary(); })[0] || images[0];
+        function free() {
+          images.forEach(function (i) { i.free(); });
+        }
+        if (!image) throw new Error('Could not read this HEIF photo.');
+        var w = image.get_width(), h = image.get_height();
+        var data;
+        try {
+          data = new ImageData(w, h);
+        } catch (e) {
+          free();
+          throw tooLarge(w, h);
+        }
+        return new Promise(function (resolve, reject) {
+          image.display(data, function (result) {
+            free();
+            if (result) resolve(data);
+            else reject(new Error('Could not decode this HEIF photo.'));
+          });
+        });
+      });
+    }).then(function (data) {
+      if (window.createImageBitmap) return shrink(data);
+      var canvas = document.createElement('canvas');
+      canvas.width = data.width;
+      canvas.height = data.height;
+      canvas.getContext('2d').putImageData(data, 0, 0);
+      return canvas;
+    });
+  }
+
+  function decodeImage(file) {
+    return decodeNative(file).catch(function (err) {
+      return isHeif(file).then(function (heif) {
+        if (!heif) throw err;
+        return decodeHeif(file);
+      });
     });
   }
 
@@ -325,6 +425,11 @@
         ? 'Choose a photo to replace ' + label
         : 'Choose a photo for ' + label;
     }
+  }
+
+  function setStatus(message) {
+    placeholder.hidden = false;
+    placeholder.textContent = message;
   }
 
   function showError(message) {

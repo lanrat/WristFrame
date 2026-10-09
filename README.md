@@ -22,6 +22,10 @@ Supported watches: **Pebble Time 2** (`emery`, 200×228) and **Pebble Round 2**
 All image processing happens on the phone, in the settings page
 ([`config/index.html`](config/index.html)):
 
+- **Decode:** JPEG, PNG and WebP decode natively. HEIF photos (the iPhone
+  camera's default) are decoded with
+  [libheif-js](https://github.com/catdad-experiments/libheif-js), which the
+  page downloads from jsDelivr only when a HEIF photo is chosen.
 - **Crop and resize:** the photo is scaled to cover the whole screen and the
   overflow is cropped evenly from both sides, so the screen is always filled.
 - **Dither:** Floyd–Steinberg dithering to the watch's 64-colour palette.
