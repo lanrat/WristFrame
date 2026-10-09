@@ -55,6 +55,13 @@ The settings page is served from GitHub Pages at
 every push to the default branch. Enable it once under **Settings → Pages →
 Source: GitHub Actions**.
 
+## Releasing
+
+Bump `version` in `package.json` (MAJOR.MINOR.PATCH) and push to `main`. The
+workflow then builds the `.pbw`, creates the `v<version>` tag and a GitHub
+release, and attaches `WristFrame.pbw`. Pushes that keep the same version do
+not create a release.
+
 ## Building
 
 ```sh
