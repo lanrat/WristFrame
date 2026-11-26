@@ -19,8 +19,11 @@ var CMD_CLEAR = 7;
 var SLOT_COUNT = 4;
 
 var MAX_RETRIES = 3;
-// Operations the watch rejects this many times are dropped.
+// Operations the watch rejects or leaves unanswered this many times are
+// dropped.
 var MAX_ATTEMPTS = 3;
+// How long to wait for the watch's DONE after the last message is sent.
+var DONE_TIMEOUT_MS = 10000;
 
 // Screen info for supported platforms, used before the watch has reported in.
 var PLATFORMS = {
@@ -229,11 +232,31 @@ function processQueue() {
     }
     console.log('Sent in ' + (Date.now() - start) + ' ms');
     setTimeout(function() {
-      if (busy === id) {
-        busy = null;
+      if (busy !== id) {
+        return;
       }
-    }, 10000);
+      // The answer was lost: send the operation again.
+      console.log('No answer from the watch for slot ' + op.slot);
+      busy = null;
+      var current = loadQueue();
+      if (current[0] && current[0].id === id) {
+        countFailure(current);
+      }
+      processQueue();
+    }, DONE_TIMEOUT_MS);
   });
+}
+
+// Counts a failed attempt at the first queued operation, dropping it after
+// MAX_ATTEMPTS, and saves the queue.
+function countFailure(queue) {
+  batchDone = 0;
+  queue[0].attempts++;
+  if (queue[0].attempts >= MAX_ATTEMPTS) {
+    console.log('Giving up on ' + queue[0].op + ' for slot ' + queue[0].slot);
+    queue.shift();
+  }
+  save('queue', queue);
 }
 
 function handleDone(msg) {
@@ -258,13 +281,8 @@ function handleDone(msg) {
     processQueue();
   } else {
     // Leave it for the next launch rather than retrying in a loop.
-    batchDone = 0;
-    op.attempts++;
     console.log('Watch rejected ' + op.op + ' for slot ' + op.slot);
-    if (op.attempts >= MAX_ATTEMPTS) {
-      queue.shift();
-    }
-    save('queue', queue);
+    countFailure(queue);
   }
 }
 

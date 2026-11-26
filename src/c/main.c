@@ -15,6 +15,8 @@
 #define RECORD_SIZE PERSIST_DATA_MAX_LENGTH
 #define INBOX_SIZE_CAP (2048 + 64)
 #define OUTBOX_SIZE 64
+// A transfer that receives nothing for this long is abandoned.
+#define RX_TIMEOUT_MS 15000
 
 enum {
   CMD_HELLO = 1,  // phone -> watch: request READY
@@ -63,6 +65,10 @@ static int s_saved_current = -1;
 static struct {
   bool active;
   bool persist;
+  // Whether the image is drawn on screen as it arrives. A button press during
+  // a transfer moves away from it, and the rest of that batch then arrives in
+  // the background.
+  bool shown;
   int slot;
   // Position of this image in the phone's current batch, for the progress label.
   int index;
@@ -71,6 +77,7 @@ static struct {
   uint32_t offset;
   uint32_t checksum;
 } s_rx;
+static AppTimer *s_rx_timer;
 
 // --- Image format helpers ----------------------------------------------------
 
@@ -272,6 +279,48 @@ static int32_t prv_int(DictionaryIterator *iter, uint32_t key) {
   return t ? t->value->int32 : -1;
 }
 
+static void prv_rx_stop(void) {
+  s_rx.active = false;
+  if (s_rx_timer) {
+    app_timer_cancel(s_rx_timer);
+    s_rx_timer = NULL;
+  }
+  layer_mark_dirty(s_image_layer);
+}
+
+// Gives up on a transfer that stopped arriving, replacing its partial image.
+// The phone sends it again on a later launch or reconnect.
+static void prv_rx_abandon(void) {
+  if (!s_rx.active) {
+    return;
+  }
+  APP_LOG(APP_LOG_LEVEL_WARNING, "Image transfer for slot %d stopped", s_rx.slot);
+  prv_rx_stop();
+  if (s_current == s_rx.slot) {
+    prv_show_from(s_rx.slot, 1);
+  }
+}
+
+static void prv_rx_timeout(void *context) {
+  s_rx_timer = NULL;
+  prv_rx_abandon();
+}
+
+static void prv_rx_touch(void) {
+  if (!s_rx_timer || !app_timer_reschedule(s_rx_timer, RX_TIMEOUT_MS)) {
+    s_rx_timer = app_timer_register(RX_TIMEOUT_MS, prv_rx_timeout, NULL);
+  }
+}
+
+static void prv_connection_changed(bool connected) {
+  if (connected) {
+    // Lets the phone resume changes that a lost connection interrupted.
+    prv_send(CMD_READY, 0, 0);
+  } else {
+    prv_rx_abandon();
+  }
+}
+
 static void prv_handle_begin(DictionaryIterator *iter) {
   const int32_t slot = prv_int(iter, MESSAGE_KEY_Slot);
   ImageMeta meta = {
@@ -282,13 +331,19 @@ static void prv_handle_begin(DictionaryIterator *iter) {
     .size = prv_int(iter, MESSAGE_KEY_Size),
     .checksum = prv_int(iter, MESSAGE_KEY_Checksum),
   };
-  s_rx.active = false;
+  const int32_t index = prv_int(iter, MESSAGE_KEY_Index);
+  prv_rx_stop();
+  // Set before any early return: END reports this slot back to the phone.
+  s_rx.slot = slot;
   if (!prv_valid_slot(slot) || !prv_meta_valid(&meta)) {
     APP_LOG(APP_LOG_LEVEL_ERROR, "Rejected image for slot %d: %dx%d size %d", (int)slot,
             meta.width, meta.height, (int)meta.size);
     return;
   }
-  if (!prv_bitmap_create(meta.width, meta.height, meta.round)) {
+  // Show the new image unless the user moved away from an earlier image of
+  // this batch (index 1 starts a new batch; older phone versions send none).
+  const bool show = index <= 1 || s_rx.shown || !s_bitmap || slot == s_current;
+  if (show && !prv_bitmap_create(meta.width, meta.height, meta.round)) {
     prv_discard_image();
     return;
   }
@@ -297,26 +352,33 @@ static void prv_handle_begin(DictionaryIterator *iter) {
     persist_delete(META_KEY(slot));
   }
   s_filled &= ~(1 << slot);
-  s_current = slot;
+  if (show) {
+    s_current = slot;
+  }
   s_rx.active = true;
-  s_rx.index = prv_int(iter, MESSAGE_KEY_Index);
+  s_rx.shown = show;
+  s_rx.index = index;
   s_rx.count = prv_int(iter, MESSAGE_KEY_Count);
   s_rx.persist = persist_get_max_size() >= meta.size + 1024;
-  s_rx.slot = slot;
   s_rx.meta = meta;
   s_rx.offset = 0;
   s_rx.checksum = FNV_OFFSET;
   if (!s_rx.persist) {
     APP_LOG(APP_LOG_LEVEL_WARNING, "Not enough persistent storage to remember the image");
   }
-  prv_show_image(true);
+  prv_rx_touch();
+  if (show) {
+    prv_show_image(true);
+  } else {
+    layer_mark_dirty(s_image_layer);  // draws the progress bar
+  }
 }
 
 static void prv_handle_chunk(DictionaryIterator *iter) {
   Tuple *data = dict_find(iter, MESSAGE_KEY_Data);
   if (!s_rx.active || !data || prv_int(iter, MESSAGE_KEY_Offset) != (int32_t)s_rx.offset ||
       s_rx.offset + data->length > s_rx.meta.size) {
-    s_rx.active = false;
+    prv_rx_stop();
     return;
   }
   const uint8_t *buf = data->value->data;
@@ -333,8 +395,11 @@ static void prv_handle_chunk(DictionaryIterator *iter) {
     }
   }
   s_rx.checksum = prv_fnv1a(s_rx.checksum, buf, len);
-  prv_decoder_feed(&s_decoder, buf, len);
+  if (s_rx.shown) {
+    prv_decoder_feed(&s_decoder, buf, len);
+  }
   s_rx.offset += len;
+  prv_rx_touch();
   layer_mark_dirty(s_image_layer);
 }
 
@@ -342,8 +407,7 @@ static void prv_handle_end(void) {
   const bool ok = s_rx.active && s_rx.offset == s_rx.meta.size &&
                   s_rx.checksum == s_rx.meta.checksum;
   const int slot = s_rx.slot;
-  s_rx.active = false;
-  layer_mark_dirty(s_image_layer);  // removes the progress bar
+  prv_rx_stop();  // also removes the progress bar
   if (!ok) {
     APP_LOG(APP_LOG_LEVEL_ERROR, "Image transfer failed");
     prv_send(CMD_DONE, 0, slot);
@@ -402,17 +466,13 @@ static void prv_inbox_received(DictionaryIterator *iter, void *context) {
 // --- UI ----------------------------------------------------------------------
 
 static void prv_step(int dir) {
-  // A button press abandons any transfer in progress; the phone retries it
-  // the next time the app opens.
-  if (s_rx.active) {
-    s_rx.active = false;
-    layer_mark_dirty(s_image_layer);
-  }
   const int from = s_current < 0 ? 0 : s_current;
   for (int i = 1; i <= SLOT_COUNT; i++) {
     const int s = (from + dir * i + SLOT_COUNT * SLOT_COUNT) % SLOT_COUNT;
     if (s_filled & (1 << s)) {
       if (s != s_current || !s_bitmap) {
+        // An image still arriving keeps arriving, in the background.
+        s_rx.shown = false;
         prv_show_from(s, dir);
       }
       return;
@@ -530,9 +590,13 @@ static void prv_init(void) {
   app_message_register_inbox_received(prv_inbox_received);
   const uint32_t inbox = app_message_inbox_size_maximum();
   app_message_open(inbox < INBOX_SIZE_CAP ? inbox : INBOX_SIZE_CAP, OUTBOX_SIZE);
+  connection_service_subscribe((ConnectionHandlers){
+      .pebble_app_connection_handler = prv_connection_changed,
+  });
 }
 
 static void prv_deinit(void) {
+  connection_service_unsubscribe();
   // Only write when changed: every persist write adds a record that slows
   // later persist calls until the firmware compacts the file.
   if (s_current >= 0 && s_current != s_saved_current) {
