@@ -16,8 +16,11 @@ Supported watches: **Pebble Time 2** (`emery`, 200×228) and **Pebble Round 2**
 
 ## Usage
 
-1. Install the `.pbw` (from the latest [GitHub Actions run](../../actions) or
-   [release](../../releases)) with the Pebble app.
+1. Install WristFrame from the
+   [Pebble app store](https://apps.repebble.com/147285f9690644639092f069) or the
+   [Rebble app store](https://apps.rebble.io/en_US/application/6b08624566ec36000948fa5e).
+   You can also install the `.pbw` from the latest [release](../../releases)
+   or [GitHub Actions run](../../actions) with the Pebble app.
 2. Open the app's settings in the Pebble app. Tap a slot and choose a photo,
    or use **Clear slot N** to empty it; repeat for as many slots as you like.
    Then tap **Send to watch** to send all the changes at once. The watch shows
