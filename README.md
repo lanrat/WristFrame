@@ -81,10 +81,80 @@ update that list if the default branch changes.
 
 ## Releasing
 
-Bump `version` in `package.json` (MAJOR.MINOR.PATCH) and push to `main`. The
-workflow then builds the `.pbw`, creates the `v<version>` tag and a GitHub
-release, and attaches `WristFrame-v<version>.pbw`. Pushes that keep the same version do
-not create a release.
+1. Add a `## <version>` section to [`CHANGELOG.md`](CHANGELOG.md) describing
+   the changes.
+2. Bump `version` in `package.json`. Pebble apps can't have a patch version,
+   so bump MAJOR or MINOR and keep the last number 0 (1.3.0, not 1.2.1).
+3. Push to `main`.
+
+The workflow checks both on every push, so a version without a changelog
+entry fails the build before it can be released. When a new version reaches
+`main`, the workflow builds the `.pbw`, creates the `v<version>` tag and a
+GitHub release with that changelog section as its notes, attaches
+`WristFrame-v<version>.pbw`, and uploads it to the app stores. Pushes that
+keep the same version release nothing.
+
+### App stores
+
+The release job uploads each new version to the
+[Pebble app store](https://apps.repebble.com) and the
+[Rebble app store](https://apps.rebble.io). Each upload is skipped until that
+store is set up, so releases work without them. The CI only updates existing
+listings; create each listing once by hand.
+
+Everything a listing needs is in [`store/`](store): the description, icons
+(48, 80 and 144 px), a 720×320 banner, and three screenshots per watch. To
+remake them:
+
+```sh
+node scripts/store-screenshots.js   # photos in store/photos/ -> store/screenshots/
+python3 scripts/store-art.py        # icons and banner
+```
+
+The screenshot script runs the settings page in a headless browser, so it
+needs Playwright (`npm install --no-save playwright && npx playwright install chromium`).
+The art script needs Pillow.
+
+**Pebble app store**
+
+1. Run `pebble login` and `pebble build`, then create the listing:
+
+   ```sh
+   pebble publish --pbw build/WristFrame.pbw --non-interactive --is-published \
+     --description "$(cat store/description.md)" \
+     --source https://github.com/lanrat/WristFrame \
+     --icon-small store/icon-80.png --icon-large store/icon-144.png \
+     --screenshots store/screenshots/*.png \
+     --release-notes "$(scripts/release-notes.sh --plain)"
+   ```
+
+   It picks a default category; change it, and add the banner, on the
+   [dashboard](https://appstore-api.repebble.com/dashboard).
+2. Add your login's refresh token as the repository secret
+   `PEBBLE_FIREBASE_REFRESH_TOKEN`:
+
+   ```sh
+   jq -r .refresh_token ~/.pebble-sdk/oauth_firebase/firebase_oauth_storage.json
+   ```
+
+   On macOS the file is in `~/Library/Application Support/Pebble SDK/`, and
+   on newer Linux installs in `~/.local/share/pebble-sdk/`.
+
+**Rebble app store**
+
+1. Create the app on the [Rebble developer portal](https://dev-portal.rebble.io/)
+   with the `.pbw` from the latest GitHub release and the files in `store/`.
+2. Add the app's ID, from its URL on the portal or store, as the repository
+   variable `REBBLE_APP_ID`.
+3. Add your portal access token as the repository secret
+   `REBBLE_ACCESS_TOKEN`. The portal doesn't show it: copy the bearer token
+   from the `Authorization` header of the portal's requests in your
+   browser's developer tools.
+
+Both stores reject a version that isn't newer than the one they have. If an
+upload fails, fix the cause, then run the workflow on `main` from the Actions
+tab and choose that store under **republish**. It uploads the current version
+again without making a new release.
 
 ## Building
 

@@ -5,6 +5,12 @@ on:
     branches: ["**"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      republish:
+        description: Upload the current version to an app store again, to retry a failed upload (no new release is made)
+        type: choice
+        options: [none, both, pebble, rebble]
+        default: none
 
 jobs:
   build:
@@ -15,9 +21,29 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Pebble only accepts MAJOR.MINOR.0 versions, and every version needs
+      # release notes, so check both before anything reaches the default branch.
+      - name: Check the version and its changelog entry
+        run: |
+          version="$(jq -r .version package.json)"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.0$ ]]; then
+            echo "::error file=package.json::Version $version must be MAJOR.MINOR.0: Pebble apps cannot have a patch version"
+            exit 1
+          fi
+          scripts/release-notes.sh "$version" > /dev/null
+
       - uses: astral-sh/setup-uv@v10.4.0
+        with:
+          enable-cache: true
+          # pebble-tool is installed by name, so there is no lockfile to key
+          # the cache on; an empty glob gives a fixed key.
+          cache-dependency-glob: ""
 
       - name: Install Pebble tool and SDK
+        env:
+          # libpebble2 has invalid escape sequences that newer Pythons warn
+          # about while byte-compiling it.
+          PYTHONWARNINGS: ignore::SyntaxWarning
         run: |
           uv tool install pebble-tool
           pebble sdk install latest
@@ -32,7 +58,8 @@ jobs:
           if-no-files-found: error
 
   # Releases the version in package.json the first time it reaches the
-  # default branch. Pushes that keep the same version release nothing.
+  # default branch, then uploads it to the app stores. Pushes that keep the
+  # same version release nothing.
   release:
     name: Release
     needs: build
@@ -40,32 +67,63 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      # Job level so the store steps can check them in `if:` and are skipped
+      # when a store is not set up. See "App stores" in the README.
+      PEBBLE_FIREBASE_REFRESH_TOKEN: ${{ secrets.PEBBLE_FIREBASE_REFRESH_TOKEN }}
+      REBBLE_ACCESS_TOKEN: ${{ secrets.REBBLE_ACCESS_TOKEN }}
+      REBBLE_APP_ID: ${{ vars.REBBLE_APP_ID }}
     steps:
       - uses: actions/checkout@v7
 
+      # new: the version has no release yet, so create one and upload it to
+      # both stores. A manual run's republish input uploads to a store again.
       - name: Check for an existing release
         id: version
+        env:
+          REPUBLISH: ${{ inputs.republish }}
         run: |
-          tag="v$(jq -r .version package.json)"
+          version="$(jq -r .version package.json)"
+          tag="v$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          new=true
           if git ls-remote --exit-code --tags origin "refs/tags/$tag" > /dev/null; then
             echo "$tag already exists, nothing to release"
-            echo "new=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "new=true" >> "$GITHUB_OUTPUT"
+            new=false
           fi
+          pebble="$new"
+          rebble="$new"
+          case "$REPUBLISH" in
+            both) pebble=true; rebble=true ;;
+            pebble) pebble=true ;;
+            rebble) rebble=true ;;
+          esac
+          publish=false
+          if [[ "$pebble" == true || "$rebble" == true ]]; then
+            publish=true
+          fi
+          echo "new=$new" >> "$GITHUB_OUTPUT"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          echo "pebble=$pebble" >> "$GITHUB_OUTPUT"
+          echo "rebble=$rebble" >> "$GITHUB_OUTPUT"
 
-      - if: steps.version.outputs.new == 'true'
+      - if: steps.version.outputs.publish == 'true'
         uses: actions/download-artifact@v8
         with:
           name: WristFrame
           path: build
 
-      - if: steps.version.outputs.new == 'true'
-        name: Add the version to the .pbw filename
+      - if: steps.version.outputs.publish == 'true'
+        name: Prepare the release files
         env:
           TAG: ${{ steps.version.outputs.tag }}
-        run: mv build/WristFrame.pbw "build/WristFrame-$TAG.pbw"
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          mv build/WristFrame.pbw "build/WristFrame-$TAG.pbw"
+          scripts/release-notes.sh "$VERSION" > build/notes.md
+          scripts/release-notes.sh "$VERSION" --plain > build/notes.txt
+          cat build/notes.md
 
       - if: steps.version.outputs.new == 'true'
         uses: softprops/action-gh-release@v3
@@ -73,9 +131,59 @@ jobs:
           tag_name: ${{ steps.version.outputs.tag }}
           target_commitish: ${{ github.sha }}
           name: WristFrame ${{ steps.version.outputs.tag }}
-          generate_release_notes: true
+          body_path: build/notes.md
           files: build/WristFrame-${{ steps.version.outputs.tag }}.pbw
           fail_on_unmatched_files: true
+
+      - if: steps.version.outputs.pebble == 'true' && env.PEBBLE_FIREBASE_REFRESH_TOKEN != ''
+        uses: astral-sh/setup-uv@v10.4.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: ""
+
+      # Updates the existing listing on apps.repebble.com, found by the app's
+      # UUID. The listing itself is created once by hand (see the README).
+      - name: Publish to the Pebble app store
+        if: steps.version.outputs.pebble == 'true' && env.PEBBLE_FIREBASE_REFRESH_TOKEN != ''
+        env:
+          PYTHONWARNINGS: ignore::SyntaxWarning
+          # The public Firebase web API key built into pebble-tool.
+          PEBBLE_FIREBASE_API_KEY: ${{ vars.PEBBLE_FIREBASE_API_KEY || 'AIzaSyBZ9Cdvwwv9At2lPmc8TxyyEqSXGXejGvc' }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          uv tool install pebble-tool
+          # Firebase ID tokens last an hour, so exchange the long-lived
+          # refresh token for a new one.
+          id_token="$(curl -sS --fail-with-body \
+            "https://securetoken.googleapis.com/v1/token?key=${PEBBLE_FIREBASE_API_KEY}" \
+            --data-urlencode grant_type=refresh_token \
+            --data-urlencode "refresh_token=${PEBBLE_FIREBASE_REFRESH_TOKEN}" | jq -r .id_token)"
+          if [[ -z "$id_token" || "$id_token" == "null" ]]; then
+            echo "::error::Could not exchange PEBBLE_FIREBASE_REFRESH_TOKEN for an ID token; run pebble login and update the secret"
+            exit 1
+          fi
+          echo "::add-mask::$id_token"
+          PEBBLE_FIREBASE_ID_TOKEN="$id_token" pebble publish \
+            --pbw "build/WristFrame-$TAG.pbw" \
+            --non-interactive \
+            --is-published \
+            --release-notes "$(cat build/notes.txt)"
+
+      # Rebble has no publish tool, so this calls its developer API directly.
+      # Runs even if the Pebble upload failed, so one store's problem does not
+      # hold back the other.
+      - name: Publish to the Rebble app store
+        if: ${{ !cancelled() && steps.version.outputs.rebble == 'true' && env.REBBLE_ACCESS_TOKEN != '' && env.REBBLE_APP_ID != '' }}
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          response="$(curl -sS --fail-with-body -X POST \
+            "https://appstore-api.rebble.io/api/dp/app/${REBBLE_APP_ID}/release" \
+            -H "Authorization: Bearer ${REBBLE_ACCESS_TOKEN}" \
+            --form-string "release_notes=$(cat build/notes.txt)" \
+            -F "pbw=@build/WristFrame-$TAG.pbw")"
+          echo "$response"
+          [[ "$(jq -r '.success // false' <<< "$response")" == "true" ]]
 
   pages:
     name: Deploy config page
