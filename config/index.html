@@ -88,7 +88,7 @@
   var WIDTH = parseInt(params.get('width'), 10) || 200;
   var HEIGHT = parseInt(params.get('height'), 10) || 228;
   var ROUND = params.get('round') === '1' ? 1 : 0;
-  var RETURN_TO = params.get('return_to') || 'pebblejs://close#';
+  var RETURN_TO = safeReturnTo(params.get('return_to'));
   var PREVIEW_SCALE = 1;
   var SLOT_COUNT = 4;
   var THUMB_WIDTH = 48;
@@ -119,6 +119,35 @@
   var selected = 0;
   for (var m = 0; m < SLOT_COUNT; m++) {
     if (!slots[m].filled) { selected = m; break; }
+  }
+
+  // Where the result goes. The Pebble app passes nothing (pebblejs://close#),
+  // and the emulator's `pebble emu-app-config` passes a localhost URL. Other
+  // web addresses and script URLs are refused, so a crafted link cannot send
+  // the chosen photo elsewhere or run code on this page.
+  function safeReturnTo(url) {
+    var fallback = 'pebblejs://close#';
+    var scheme = /^([a-z][a-z0-9+.-]*):/i.exec(url || '');
+    if (!scheme) return fallback;
+    switch (scheme[1].toLowerCase()) {
+      case 'http':
+      case 'https':
+        try {
+          var host = new URL(url).hostname;
+          return host === 'localhost' || host === '127.0.0.1' || host === '[::1]' ? url : fallback;
+        } catch (e) {
+          return fallback;
+        }
+      case 'javascript':
+      case 'data':
+      case 'vbscript':
+      case 'blob':
+      case 'file':
+      case 'about':
+        return fallback;
+      default:
+        return url;
+    }
   }
 
   // Visible pixel columns [x0, x1) of row y. Must match prv_row_span in
