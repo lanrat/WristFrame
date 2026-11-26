@@ -6,6 +6,14 @@ to 4 photos; press Up and Down on the watch to switch between them.
 Supported watches: **Pebble Time 2** (`emery`, 200×228) and **Pebble Round 2**
 (`gabbro`, 260×260 round).
 
+<p align="center">
+  <img src="docs/emery.png" alt="A sunset photo on the Pebble Time 2" width="200">
+  &nbsp;&nbsp;
+  <img src="docs/gabbro.png" alt="The same photo on the round Pebble Round 2" width="260">
+  &nbsp;&nbsp;
+  <img src="docs/settings.png" alt="The settings page, with a new photo chosen for slot 1" width="200">
+</p>
+
 ## Usage
 
 1. Install the `.pbw` (from the latest [GitHub Actions run](../../actions) or
@@ -14,10 +22,18 @@ Supported watches: **Pebble Time 2** (`emery`, 200×228) and **Pebble Round 2**
    or use **Clear slot N** to empty it; repeat for as many slots as you like.
    Then tap **Send to watch** to send all the changes at once. The watch shows
    each photo as it arrives, with a progress bar (a ring on the Round 2) and
-   a count such as "2/3".
+   a count such as "2/3". Pressing Up or Down while photos arrive shows
+   another photo; the transfer carries on in the background.
 3. Photos are stored on the watch, so they are available even when the phone
    is not connected. Press **Up** and **Down** to switch between them. The app
    reopens on the last photo shown.
+
+## Privacy
+
+Your photos never leave your phone. The settings page converts them on the
+phone itself, and the result goes straight to the watch. Nothing is uploaded,
+and there are no analytics or accounts. The only download is the HEIF decoder
+described below, fetched from jsDelivr when you choose a HEIF photo.
 
 ## How it works
 
@@ -39,7 +55,7 @@ settings page returns it to the app as URL-safe base64, together with a small
 thumbnail for the slot tiles. The phone-side JavaScript
 ([`src/pkjs/index.js`](src/pkjs/index.js)) queues each change and sends it to
 the watch in 2 KB AppMessage chunks. If a transfer is interrupted, it is
-retried the next time the app opens.
+retried when the watch reconnects or the next time the app opens.
 
 The watch ([`src/c/main.c`](src/c/main.c)) decodes chunks as they arrive. It
 saves them to persistent storage in 256-byte records, plus a header with a
@@ -88,3 +104,7 @@ pebble emu-app-config --emulator emery --file config/index.html
 When you use `--file`, the page gets no screen size from the app and defaults
 to the Time 2's 200×228. For the Round 2, add
 `&width=260&height=260&round=1` to the URL the browser opens.
+
+## License
+
+[MIT](LICENSE)
