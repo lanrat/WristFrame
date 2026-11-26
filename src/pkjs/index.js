@@ -1,7 +1,7 @@
 // Phone-side transfer of converted images to the watch.
 //
 // The config page (config/index.html) does all image processing: it crops,
-// resizes, dithers to the 64-colour palette and packs the pixels. This file
+// resizes, dithers to the 64-color palette and packs the pixels. This file
 // only moves those bytes to the watch's image slots, keeps a queue of
 // operations that have not reached the watch yet, and remembers a thumbnail
 // per slot for the config page.

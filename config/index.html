@@ -335,7 +335,7 @@
     return ctx.getImageData(0, 0, WIDTH, HEIGHT);
   }
 
-  // Floyd-Steinberg dither to Pebble's 64-colour palette (2 bits per channel).
+  // Floyd-Steinberg dither to Pebble's 64-color palette (2 bits per channel).
   // Returns one 6-bit rrggbb value per pixel and updates `image` in place.
   function dither(image) {
     var w = image.width, h = image.height, d = image.data;

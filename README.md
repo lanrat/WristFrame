@@ -49,7 +49,7 @@ All image processing happens on the phone, in the settings page
   page downloads from jsDelivr only when a HEIF photo is chosen.
 - **Crop and resize:** the photo is scaled to cover the whole screen and the
   overflow is cropped evenly from both sides, so the screen is always filled.
-- **Dither:** Floyd–Steinberg dithering to the watch's 64-colour palette.
+- **Dither:** Floyd–Steinberg dithering to the watch's 64-color palette.
 - **Pack:** 6 bits per pixel. On the round watch, pixels outside the visible
   circle are left out (about 21% less data).
 

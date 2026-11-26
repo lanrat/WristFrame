@@ -1,7 +1,7 @@
 #include <pebble.h>
 
 // Image wire/storage format (produced by config/index.html on the phone):
-// 64-colour pixels, 6 bits each (rrggbb), packed MSB-first, row-major.
+// 64-color pixels, 6 bits each (rrggbb), packed MSB-first, row-major.
 // On round displays only the pixels inside the visible circle are included
 // (see prv_row_span, mirrored in config/index.html).
 //

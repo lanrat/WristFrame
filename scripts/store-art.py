@@ -16,7 +16,7 @@ from PIL import Image, ImageDraw, ImageFont
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STORE = os.path.join(ROOT, "store")
 
-# The menu icon's colours, from Pebble's 64-colour palette.
+# The menu icon's colors, from Pebble's 64-color palette.
 FRAME = (255, 170, 85)
 SKY = (85, 170, 255)
 SUN = (255, 255, 0)

@@ -24,4 +24,4 @@ the section for the new version into the GitHub release and both app stores.
 
 - First release: shows a photo full screen on the Pebble Time 2 and Pebble Round 2.
 - Holds up to 4 photos; press Up and Down to switch between them.
-- Photos are converted on the phone, dithered to the watch's 64 colours, and stored on the watch so they work without the phone.
+- Photos are converted on the phone, dithered to the watch's 64 colors, and stored on the watch so they work without the phone.
