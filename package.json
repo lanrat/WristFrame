@@ -1,8 +1,11 @@
 {
   "name": "wristframe",
   "author": "lanrat",
+  "license": "MIT",
   "version": "1.1.0",
-  "keywords": ["pebble-app"],
+  "keywords": [
+    "pebble-app"
+  ],
   "private": true,
   "dependencies": {},
   "pebble": {
@@ -37,7 +40,14 @@
       "Count"
     ],
     "resources": {
-      "media": []
+      "media": [
+        {
+          "type": "bitmap",
+          "name": "IMAGE_MENU_ICON",
+          "file": "images/menu_icon.png",
+          "menuIcon": true
+        }
+      ]
     }
   }
 }
